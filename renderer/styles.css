@@ -1,0 +1,726 @@
+/* ============================================================
+   番茄钟 · 主界面样式
+   Win11 Fluent Design：Mica/Acrylic 玻璃 + 柔和圆角 + 光感
+   ============================================================ */
+
+:root {
+  /* 专注：番茄红珊瑚渐变 */
+  --accent-a: #ff6b6b;
+  --accent-b: #ff9f5a;
+  --accent-c: #ff4d8d;
+  --accent-soft: rgba(255, 107, 107, 0.16);
+  --ring-grad-1: #ff6b6b;
+  --ring-grad-2: #ff9f5a;
+
+  /* Win10 DWM 毛玻璃无法跟随圆角裁剪（圆角外露方角），改为近不透明圆角卡片，
+     仅保留少量透明度让卡片有一丝通透感 */
+  --bg-glass: rgba(28, 30, 40, 0.97);
+  --bg-glass-strong: rgba(24, 26, 36, 0.97);
+  --card-border: rgba(255, 255, 255, 0.12);
+  --text: #f2f3f7;
+  --text-dim: rgba(242, 243, 247, 0.62);
+  --text-faint: rgba(242, 243, 247, 0.4);
+  --surface-hover: rgba(255, 255, 255, 0.08);
+  --surface-active: rgba(255, 255, 255, 0.12);
+
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* 阶段配色切换：用 body 类切换变量 */
+body.phase-break {
+  --accent-a: #2ed573;
+  --accent-b: #0abde3;
+  --accent-c: #1dd1a1;
+  --accent-soft: rgba(46, 213, 115, 0.16);
+  --ring-grad-1: #2ed573;
+  --ring-grad-2: #0abde3;
+}
+
+body.phase-longBreak {
+  --accent-a: #54a0ff;
+  --accent-b: #5f27cd;
+  --accent-c: #74b9ff;
+  --accent-soft: rgba(84, 160, 255, 0.16);
+  --ring-grad-1: #54a0ff;
+  --ring-grad-2: #5f27cd;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: transparent;
+  font-family: "Segoe UI Variable Text", "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei", system-ui, sans-serif;
+  -webkit-user-select: none;
+  user-select: none;
+  color: var(--text);
+}
+
+/* ---------- 主容器（圆角玻璃卡片） ---------- */
+#app {
+  position: relative;
+  width: 100%;
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 12px;
+  overflow: hidden;
+  background: var(--bg-glass);
+  /* 毛玻璃由窗口级 DWM Acrylic 提供（main.js），CSS 层不再叠加 backdrop-filter */
+  border: 1px solid var(--card-border);
+  /* 透明窗口没有系统圆角裁剪，外投影会溢出到圆角外的方形角落，
+     所以只保留内高光，不画外部阴影 */
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+}
+
+/* 玻璃内部噪点纹理（模拟 Acrylic 颗粒感，让玻璃更真实） */
+#app .glass-noise {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  opacity: 0.6;
+  background-image:
+    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.045) 1px, transparent 0),
+    radial-gradient(circle at 3px 3px, rgba(0, 0, 0, 0.05) 1px, transparent 0);
+  background-size: 4px 4px, 6px 6px;
+}
+
+/* 玻璃顶部斜向高光（让卡片有立体玻璃感） */
+#app .glass-sheen {
+  position: absolute;
+  top: -40%;
+  left: -30%;
+  width: 160%;
+  height: 90%;
+  z-index: 0;
+  border-radius: inherit;
+  pointer-events: none;
+  pointer-events: none;
+  background: linear-gradient(135deg,
+    rgba(255, 255, 255, 0.09) 0%,
+    rgba(255, 255, 255, 0.02) 30%,
+    transparent 60%);
+}
+
+/* 背景光斑（营造通透感） */
+#app::before,
+#app::after {
+  content: '';
+  position: absolute;
+  border-radius: 50%;
+  pointer-events: none;
+  z-index: 0;
+}
+#app::before {
+  width: 240px; height: 240px;
+  top: -90px; right: -70px;
+  background: radial-gradient(circle, var(--accent-soft), transparent 70%);
+  transition: background 0.6s;
+}
+#app::after {
+  width: 200px; height: 200px;
+  bottom: -80px; left: -60px;
+  background: radial-gradient(circle, var(--accent-soft), transparent 70%);
+  transition: background 0.6s;
+}
+
+/* ---------- 标题栏 ---------- */
+.titlebar {
+  position: relative;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  height: 40px;
+  padding-left: 14px;
+  flex: 0 0 40px;
+}
+.titlebar-drag {
+  flex: 1;
+  -webkit-app-region: drag;
+  height: 100%;
+  display: flex;
+  align-items: center;
+}
+.app-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.3px;
+  color: var(--text);
+}
+.app-logo {
+  width: 24px;
+  height: 24px;
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+  box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+}
+.titlebar-actions {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding-right: 8px;
+  -webkit-app-region: no-drag;
+}
+.win-btn {
+  width: 38px;
+  height: 30px;
+  border: none;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-dim);
+  border-radius: 7px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: background 0.12s, color 0.12s, transform 0.1s;
+}
+.win-btn:hover { background: rgba(255, 255, 255, 0.14); color: var(--text); }
+.win-btn:active { transform: scale(0.92); }
+.win-btn.is-active {
+  background: var(--accent-soft);
+  color: var(--accent-a);
+}
+.win-btn-close:hover { background: #e81123; color: #fff; }
+
+/* ---------- 阶段 Tab ---------- */
+.phase-tabs {
+  position: relative;
+  z-index: 2;
+  display: flex;
+  gap: 6px;
+  padding: 0 16px;
+  margin-top: 2px;
+}
+.phase-tab {
+  flex: 1;
+  padding: 7px 0 6px;
+  border: none;
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  border-radius: 9px;
+  cursor: pointer;
+  transition: all 0.2s var(--ease-out);
+  position: relative;
+}
+.phase-tab:hover { color: var(--text); background: var(--surface-hover); }
+.phase-tab.active {
+  color: var(--text);
+  background: var(--surface-active);
+  font-weight: 600;
+}
+.phase-tab.active::after {
+  content: '';
+  position: absolute;
+  left: 20%;
+  right: 20%;
+  bottom: -1px;
+  height: 2.5px;
+  border-radius: 2px;
+  background: linear-gradient(90deg, var(--accent-a), var(--accent-b));
+  transition: all 0.3s var(--ease-out);
+}
+
+/* ---------- 计时区域 ---------- */
+.timer-area {
+  position: relative;
+  z-index: 2;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 14px;
+  padding: 4px 0 8px;
+}
+
+.ring-wrap {
+  position: relative;
+  width: 220px;
+  height: 220px;
+}
+.ring {
+  width: 100%;
+  height: 100%;
+  transform: rotate(-90deg);
+}
+.ring-bg {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.09);
+  stroke-width: 9;
+}
+.ring-progress {
+  fill: none;
+  stroke: url(#ringGrad);
+  stroke-width: 9;
+  stroke-linecap: round;
+  stroke-dasharray: 615.75;   /* 2π·98 ≈ 615.75 */
+  stroke-dashoffset: 0;
+  transition: stroke-dashoffset 1s linear, filter 0.3s;
+  filter: drop-shadow(0 0 6px var(--accent-soft));
+}
+.ring-inner {
+  fill: none;
+  stroke: rgba(255, 255, 255, 0.05);
+  stroke-width: 1;
+}
+#ringGrad stop:nth-child(1) { stop-color: var(--ring-grad-1); transition: stop-color 0.5s; }
+#ringGrad stop:nth-child(2) { stop-color: var(--ring-grad-2); transition: stop-color 0.5s; }
+
+.ring-center {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 3px;
+}
+.time-display {
+  font-size: 52px;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 1px;
+  line-height: 1;
+  background: linear-gradient(180deg, #ffffff, rgba(255,255,255,0.78));
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  filter: drop-shadow(0 2px 10px rgba(0,0,0,0.3));
+}
+.phase-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--accent-a);
+  letter-spacing: 0.4px;
+  transition: color 0.4s;
+}
+.round-label {
+  font-size: 11px;
+  color: var(--text-faint);
+  margin-top: 2px;
+}
+
+/* 会话圆点 */
+.round-dots {
+  display: flex;
+  gap: 9px;
+  align-items: center;
+  justify-content: center;
+}
+.round-dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.16);
+  transition: all 0.3s var(--ease-spring);
+}
+.round-dot.done {
+  background: var(--accent-a);
+  box-shadow: 0 0 8px var(--accent-soft);
+  transform: scale(1.15);
+}
+.round-dot.current {
+  border: 2px solid var(--accent-b);
+  background: transparent;
+  transform: scale(1.25);
+}
+
+/* ---------- 控制区 ---------- */
+.controls {
+  position: relative;
+  z-index: 2;
+  padding: 4px 0 22px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+.controls-row {
+  display: flex;
+  align-items: center;
+  gap: 26px;
+}
+.ctrl-btn {
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  background: var(--surface-hover);
+  color: var(--text-dim);
+  display: grid;
+  place-items: center;
+  flex-shrink: 0;
+  cursor: pointer;
+  transition: all 0.18s var(--ease-out);
+}
+.ctrl-btn svg,
+.primary-btn svg {
+  display: block; /* 去掉 inline 基线参与布局带来的偏移 */
+}
+.ctrl-btn:hover {
+  background: var(--surface-active);
+  color: var(--text);
+  transform: translateY(-1px);
+}
+.ctrl-btn:active { transform: scale(0.9); }
+
+.primary-btn {
+  width: 72px;
+  height: 72px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  flex-shrink: 0;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+  box-shadow:
+    0 8px 24px var(--accent-soft),
+    0 2px 8px rgba(0, 0, 0, 0.25),
+    inset 0 1px 0 rgba(255, 255, 255, 0.35);
+  transition: transform 0.18s var(--ease-spring), box-shadow 0.2s, filter 0.2s;
+}
+.primary-btn:hover {
+  transform: translateY(-2px) scale(1.04);
+  filter: brightness(1.06);
+  box-shadow: 0 12px 32px var(--accent-soft), 0 4px 12px rgba(0,0,0,0.3);
+}
+.primary-btn:active { transform: scale(0.94); }
+.primary-btn.running {
+  background: linear-gradient(135deg, #3a3f52, #2b2f3d);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.12);
+}
+
+.controls-hint {
+  font-size: 11.5px;
+  color: var(--text-faint);
+  letter-spacing: 0.2px;
+}
+
+/* ---------- 配置抽屉 ---------- */
+.settings-drawer {
+  position: absolute;
+  inset: 0;
+  z-index: 10;
+  pointer-events: none;
+}
+.drawer-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.4);
+  opacity: 0;
+  transition: opacity 0.25s;
+  pointer-events: none;
+}
+.drawer-panel {
+  position: absolute;
+  left: 0; right: 0; bottom: 0;
+  padding: 18px 20px 24px;
+  background: var(--bg-glass-strong);
+  border-top: 1px solid var(--card-border);
+  border-radius: 16px 16px 0 0;
+  transform: translateY(105%);
+  transition: transform 0.32s var(--ease-out);
+  pointer-events: auto;
+  box-shadow: 0 -12px 40px rgba(0,0,0,0.4);
+}
+.settings-drawer.open { pointer-events: auto; }
+.settings-drawer.open .drawer-backdrop { opacity: 1; pointer-events: auto; }
+.settings-drawer.open .drawer-panel { transform: translateY(0); }
+
+.drawer-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 14px;
+  font-weight: 600;
+  margin-bottom: 16px;
+}
+.drawer-close {
+  width: 28px; height: 28px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-dim);
+  cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+}
+.drawer-close:hover { background: var(--surface-hover); color: var(--text); }
+
+.setting-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--text);
+}
+.setting-row input[type="number"] {
+  width: 64px;
+  padding: 6px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--card-border);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 13px;
+  font-family: inherit;
+  text-align: center;
+  outline: none;
+  transition: border 0.15s, background 0.15s;
+}
+.setting-row input[type="number"]:focus {
+  border-color: var(--accent-a);
+  background: rgba(255, 255, 255, 0.12);
+}
+input[type="number"]::-webkit-outer-spin-button,
+input[type="number"]::-webkit-inner-spin-button {
+  -webkit-appearance: none;
+}
+
+/* 开关 */
+.toggle-row { justify-content: space-between; }
+.switch {
+  position: relative;
+  width: 40px;
+  height: 20px;
+  cursor: pointer;
+}
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider {
+  position: absolute;
+  inset: 0;
+  background: rgba(255, 255, 255, 0.18);
+  border-radius: 20px;
+  transition: 0.2s;
+}
+.slider::before {
+  content: '';
+  position: absolute;
+  width: 16px; height: 16px;
+  left: 2px; top: 2px;
+  background: #fff;
+  border-radius: 50%;
+  transition: 0.2s var(--ease-spring);
+  box-shadow: 0 1px 4px rgba(0,0,0,0.3);
+}
+.switch input:checked + .slider {
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+}
+.switch input:checked + .slider::before {
+  transform: translateX(20px);
+}
+
+.drawer-save {
+  width: 100%;
+  margin-top: 6px;
+  padding: 10px;
+  border: none;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+  color: #fff;
+  font-size: 13.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: filter 0.15s, transform 0.1s;
+  box-shadow: 0 4px 14px var(--accent-soft);
+}
+.drawer-save:hover { filter: brightness(1.08); }
+.drawer-save:active { transform: scale(0.98); }
+
+/* ---------- 迷你悬浮模式（固定悬浮：只剩倒计时的小方窗） ---------- */
+/* 注意：迷你模式不能设置 -webkit-app-region: drag，原生拖拽区会吞掉 :hover
+   与鼠标事件（悬停浮出按钮会失效）；拖拽由 app.js 跟随光标手动实现 */
+body.mini .ring-center {
+  cursor: pointer;
+}
+body.mini .titlebar,
+body.mini .phase-tabs,
+body.mini .round-dots,
+body.mini .round-label,
+body.mini .settings-drawer {
+  display: none;
+}
+/* 迷你模式不显示进度圆环，只留时间 + 阶段文字 */
+body.mini .ring {
+  display: none;
+}
+body.mini .timer-area {
+  padding: 0;
+  gap: 0;
+}
+/* 紧凑布局：窗口只有时间+文字那么大。
+   悬停：时间缩小靠到左侧（仍可点击展开），按钮从右侧浮出 */
+body.mini .ring-wrap {
+  width: 100%;
+  height: 100%;
+}
+body.mini .ring-center {
+  padding: 0;
+  transition: transform 0.16s var(--ease-out);
+}
+body.mini #app:hover .ring-center {
+  align-items: flex-start;
+  padding-left: 12px;
+  transform: scale(0.78);
+  transform-origin: left center;
+}
+body.mini .time-display {
+  font-size: 26px;
+  letter-spacing: 0.5px;
+}
+body.mini .phase-label {
+  font-size: 11px;
+  letter-spacing: 0.3px;
+}
+
+/* 悬停小窗：按钮组靠右浮出（重置 / 开始·暂停 / 跳过），时间靠左缩小。
+   容器始终 pointer-events:none，只让按钮可点：
+   点空处仍能穿到 .ring-center 触发展开、拖拽也照常 */
+body.mini .controls {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  right: 8px;
+  z-index: 6;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  background: none;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateX(4px);
+  transition: opacity 0.16s var(--ease-out), transform 0.16s var(--ease-out);
+}
+body.mini #app:hover .controls {
+  opacity: 1;
+  transform: translateX(0);
+}
+body.mini #app:hover .controls .ctrl-btn,
+body.mini #app:hover .controls .primary-btn {
+  pointer-events: auto;
+}
+body.mini .controls-hint {
+  display: none;
+}
+body.mini .controls-row {
+  gap: 8px;
+}
+body.mini .ctrl-btn {
+  width: 20px;
+  height: 20px;
+  padding: 0; /* 清掉 UA 默认 padding，否则 20px 圆里图标被挤得不居中 */
+}
+body.mini .ctrl-btn svg {
+  width: 10px;
+  height: 10px;
+}
+body.mini .primary-btn {
+  width: 26px;
+  height: 26px;
+  padding: 0;
+}
+body.mini .primary-btn svg {
+  width: 12px;
+  height: 12px;
+}
+/* 播放三角的视觉重心天然偏左，常规做法向右光学微调 1px */
+body.mini .primary-btn #iconPlay,
+body.mini .primary-btn #iconResume {
+  transform: translateX(1px);
+}
+
+/* ---------- 贴边隐藏：只露一条随倒计时消耗的进度条细条 ---------- */
+.dock-bar {
+  display: none;
+}
+/* Windows 会钳制窗口最小宽高（约 32×39），所以收起态窗口实际比细条大，
+   多出的部分必须完全透明（点击/悬停都穿透）：清掉卡片的一切绘制，
+   只在靠屏幕边缘的 6px 里画进度条 */
+body.dock-hidden #app {
+  background: none;
+  border: none;
+  box-shadow: none;
+  border-radius: 0;
+}
+body.dock-hidden .dock-bar {
+  display: block;
+  position: absolute;
+  z-index: 7;
+  border-radius: 2px;
+  overflow: hidden;
+  background: rgba(24, 26, 36, 0.97);
+}
+body.dock-left .dock-bar {
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+}
+body.dock-right .dock-bar {
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+}
+body.dock-top .dock-bar {
+  left: 0;
+  right: 0;
+  top: 0;
+  height: 6px;
+}
+body.dock-bottom .dock-bar {
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: 6px;
+}
+body.dock-hidden .glass-noise,
+body.dock-hidden .glass-sheen,
+body.dock-hidden .timer-area,
+body.dock-hidden .controls {
+  display: none;
+}
+/* 背景光斑伪元素也要藏掉，否则会在透明留白区画出半透明色块 */
+body.dock-hidden #app::before,
+body.dock-hidden #app::after {
+  display: none;
+}
+/* 左右贴边：竖向进度（自下而上消耗完为满→空） */
+.dock-fill {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  height: calc(var(--dock-p, 1) * 100%);
+  background: linear-gradient(180deg, var(--ring-grad-1), var(--ring-grad-2));
+  transition: height 1s linear;
+}
+/* 上下贴边：横向进度 */
+body.dock-top .dock-fill,
+body.dock-bottom .dock-fill {
+  top: 0;
+  bottom: auto;
+  height: 100%;
+  width: calc(var(--dock-p, 1) * 100%);
+  background: linear-gradient(90deg, var(--ring-grad-1), var(--ring-grad-2));
+  transition: width 1s linear;
+}

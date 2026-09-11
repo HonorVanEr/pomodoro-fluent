@@ -1,0 +1,18 @@
+# 依赖
+node_modules/
+
+# 构建产物
+dist/
+out/
+
+# 缓存与测试临时文件
+.electron-cache/
+.env-test/
+smoke-test.js
+func-test.js
+icon-test.js
+material-test.js
+
+# 系统文件
+Thumbs.db
+.DS_Store

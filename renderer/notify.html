@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self';" />
+  <title>番茄钟提醒</title>
+  <link rel="stylesheet" href="notify.css" />
+</head>
+<body>
+  <div id="notify-card" class="notify-card" data-type="work">
+    <div class="glass-blob blob-a"></div>
+    <div class="glass-blob blob-b"></div>
+
+    <div class="notify-body">
+      <div class="notify-icon-wrap">
+        <div class="notify-icon" id="notifyIcon">
+          <!-- inline SVG injected -->
+        </div>
+        <div class="icon-ring" id="iconRing"></div>
+      </div>
+
+      <div class="notify-content">
+        <div class="notify-title" id="notifyTitle">时间到</div>
+        <div class="notify-message" id="notifyMessage"></div>
+        <div class="notify-sub" id="notifySub"></div>
+      </div>
+
+      <button class="notify-close" id="notifyClose" title="关闭" aria-label="关闭">
+        <svg viewBox="0 0 16 16" width="12" height="12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round">
+          <path d="M3 3l10 10M13 3L3 13" />
+        </svg>
+      </button>
+    </div>
+
+    <div class="notify-progress"><div class="notify-progress-fill" id="notifyProgress"></div></div>
+  </div>
+
+  <script src="notify.js"></script>
+</body>
+</html>

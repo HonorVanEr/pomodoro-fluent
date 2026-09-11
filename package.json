@@ -1,0 +1,59 @@
+{
+  "name": "pomodoro-fluent",
+  "version": "1.0.0",
+  "description": "A Win11 Fluent-style Pomodoro timer with system tray, floating always-on-top window and beautiful notifications",
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "pack": "electron-builder --win",
+    "pack:dir": "electron-builder --win dir"
+  },
+  "author": "HonorVanEr",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/HonorVanEr/pomodoro-fluent.git"
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  },
+  "build": {
+    "appId": "com.pomodoro.fluent",
+    "productName": "番茄钟",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "compression": "maximum",
+    "afterPack": "scripts/afterPack.js",
+    "files": [
+      "main.js",
+      "preload.js",
+      "renderer/**/*",
+      "assets/**/*",
+      "apply-acrylic.ps1",
+      "package.json"
+    ],
+    "asar": true,
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-Setup-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "番茄钟"
+    }
+  }
+}
