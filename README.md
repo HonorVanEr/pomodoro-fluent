@@ -108,7 +108,6 @@ pomodoro-fluent/
 ├── preload.js           # 安全桥接层
 ├── package.json
 ├── apply-acrylic.ps1    # Acrylic 毛玻璃（DWM API，PowerShell）
-├── 启动番茄钟.bat        # 免命令行启动脚本
 ├── assets/              # 图标资源（自动生成）
 │   ├── icon.png         # 应用/窗口图标
 │   └── tray.png         # 托盘图标模板
