@@ -68,26 +68,33 @@ html, body {
   flex-direction: column;
   border-radius: 12px;
   overflow: hidden;
-  background: var(--bg-glass);
+  /* 卡片底色：右上环境光提亮 + 纵向深浅渐变，代替原来的死板纯色，
+     保留 0.97 透明度维持一丝通透感 */
+  background:
+    radial-gradient(130% 100% at 88% -8%, rgba(255, 255, 255, 0.05), transparent 56%),
+    linear-gradient(168deg,
+      rgba(37, 40, 52, 0.97) 0%,
+      rgba(28, 30, 40, 0.97) 46%,
+      rgba(21, 23, 31, 0.97) 100%);
   /* 毛玻璃由窗口级 DWM Acrylic 提供（main.js），CSS 层不再叠加 backdrop-filter */
   border: 1px solid var(--card-border);
   /* 透明窗口没有系统圆角裁剪，外投影会溢出到圆角外的方形角落，
-     所以只保留内高光，不画外部阴影 */
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.06);
+     所以只画内高光 + 一圈极淡的内晕影增加纵深，不画外部阴影 */
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.07),
+    inset 0 0 26px rgba(0, 0, 0, 0.16);
 }
 
-/* 玻璃内部噪点纹理（模拟 Acrylic 颗粒感，让玻璃更真实） */
+/* 玻璃细颗粒：SVG feTurbulence 生成的连续噪点（不再是像素感的圆点矩阵），
+   极低透明度下呈现细腻磨砂质感，顺带压住渐变的色带 */
 #app .glass-noise {
   position: absolute;
   inset: 0;
   z-index: 0;
   border-radius: inherit;
   pointer-events: none;
-  opacity: 0.6;
-  background-image:
-    radial-gradient(circle at 1px 1px, rgba(255, 255, 255, 0.045) 1px, transparent 0),
-    radial-gradient(circle at 3px 3px, rgba(0, 0, 0, 0.05) 1px, transparent 0);
-  background-size: 4px 4px, 6px 6px;
+  opacity: 0.05;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.8' numOctaves='2' stitchTiles='stitch'/%3E%3CfeColorMatrix type='saturate' values='0'/%3E%3C/filter%3E%3Crect width='200' height='200' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
 /* 玻璃顶部斜向高光（让卡片有立体玻璃感） */
@@ -100,11 +107,10 @@ html, body {
   z-index: 0;
   border-radius: inherit;
   pointer-events: none;
-  pointer-events: none;
   background: linear-gradient(135deg,
-    rgba(255, 255, 255, 0.09) 0%,
-    rgba(255, 255, 255, 0.02) 30%,
-    transparent 60%);
+    rgba(255, 255, 255, 0.08) 0%,
+    rgba(255, 255, 255, 0.025) 32%,
+    transparent 58%);
 }
 
 /* 背景光斑（营造通透感） */
@@ -117,15 +123,15 @@ html, body {
   z-index: 0;
 }
 #app::before {
-  width: 240px; height: 240px;
-  top: -90px; right: -70px;
-  background: radial-gradient(circle, var(--accent-soft), transparent 70%);
+  width: 280px; height: 280px;
+  top: -110px; right: -80px;
+  background: radial-gradient(circle, var(--accent-soft), transparent 68%);
   transition: background 0.6s;
 }
 #app::after {
-  width: 200px; height: 200px;
-  bottom: -80px; left: -60px;
-  background: radial-gradient(circle, var(--accent-soft), transparent 70%);
+  width: 240px; height: 240px;
+  bottom: -100px; left: -70px;
+  background: radial-gradient(circle, var(--accent-soft), transparent 68%);
   transition: background 0.6s;
 }
 
@@ -434,7 +440,10 @@ html, body {
   position: absolute;
   left: 0; right: 0; bottom: 0;
   padding: 18px 20px 24px;
-  background: var(--bg-glass-strong);
+  /* 与主卡片同族的微渐变底色，避免抽屉弹开后底色断层 */
+  background: linear-gradient(178deg,
+    rgba(27, 29, 39, 0.98) 0%,
+    rgba(22, 24, 33, 0.98) 100%);
   border-top: 1px solid var(--card-border);
   border-radius: 16px 16px 0 0;
   transform: translateY(105%);
