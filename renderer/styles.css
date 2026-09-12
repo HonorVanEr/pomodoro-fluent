@@ -568,6 +568,24 @@ body.mini .round-label,
 body.mini .settings-drawer {
   display: none;
 }
+/* 迷你小窗面积小：噪点颗粒和高光在 tiny 窗里会显得脏、发蒙，
+   只留主卡片同款渐变底色，观感与主界面一致 */
+body.mini .glass-noise,
+body.mini .glass-sheen {
+  display: none;
+}
+/* 迷你小窗：透明度调高（0.97 → ~0.8，能透出桌面），并去掉白边——
+   1px 白描边和内高光在大窗上是玻璃亮边，在 176×64 的小窗上只剩"白线"感 */
+body.mini #app {
+  background:
+    radial-gradient(130% 100% at 88% -8%, rgba(255, 255, 255, 0.04), transparent 56%),
+    linear-gradient(168deg,
+      rgba(37, 40, 52, 0.84) 0%,
+      rgba(28, 30, 40, 0.8) 46%,
+      rgba(21, 23, 31, 0.78) 100%);
+  border-color: transparent;
+  box-shadow: none;
+}
 /* 迷你模式不显示进度圆环，只留时间 + 阶段文字 */
 body.mini .ring {
   display: none;
