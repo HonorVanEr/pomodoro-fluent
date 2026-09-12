@@ -30,6 +30,8 @@
     "files": [
       "main.js",
       "preload.js",
+      "gateway.js",
+      "bin/**/*",
       "renderer/**/*",
       "assets/**/*",
       "apply-acrylic.ps1",

@@ -14,6 +14,7 @@
 - **📌 迷你悬浮窗**：点击图钉收成 176×64 紧凑小窗，只剩时间与阶段文字；悬停时按钮从右侧浮出；置顶显示、自动撤下任务栏图标
 - **🧲 贴边隐藏**：迷你小窗拖到屏幕上/下/左/右边缘自动吸附，收起成 6px 进度细条；悬停滑出完整小窗，移开自动收回；多显示器下不串屏
 - **🖥️ 后台运行**：关闭窗口最小化到系统托盘，后台持续计时
+- **🤖 Agent 集成**：本地 Agent 网关 + hook CLI，Claude Code / OpenCode 需要确认、权限审批或任务完成时弹窗提醒，支持弹窗上直接「允许/拒绝」；统计专注期 agent 工具调用与打断次数，agent 空闲时建议休息（详见 [Agent 集成指南](docs/agent-hooks.md)）
 - **🎨 智能配色**：界面配色随阶段变化（专注红 / 短休绿 / 长休蓝）
 - **🖱️ 无边框玻璃窗口**：Fluent 圆角卡片，可自由拖动
 
@@ -106,18 +107,21 @@ npm run pack
 pomodoro-fluent/
 ├── main.js              # Electron 主进程
 ├── preload.js           # 安全桥接层
+├── gateway.js           # Agent 网关（本地 HTTP，hooks 对接）
+├── bin/
+│   └── pomodoro-hook.js # Agent hook CLI（Claude Code / OpenCode / curl）
 ├── package.json
 ├── apply-acrylic.ps1    # Acrylic 毛玻璃（DWM API，PowerShell）
 ├── assets/              # 图标资源（自动生成）
 │   ├── icon.png         # 应用/窗口图标
 │   └── tray.png         # 托盘图标模板
 ├── scripts/             # 打包辅助脚本（afterPack）
-├── docs/                # 截图
+├── docs/                # 截图与文档（agent-hooks.md）
 └── renderer/            # 界面
     ├── index.html       # 主窗口
     ├── styles.css       # 主界面样式（Win11 Fluent）
     ├── app.js           # 番茄钟逻辑
-    ├── notify.html      # 通知弹窗
+    ├── notify.html      # 通知弹窗（支持 agent 确认模式）
     ├── notify.css       # 弹窗样式
     └── notify.js        # 弹窗逻辑
 ```

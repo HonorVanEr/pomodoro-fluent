@@ -24,6 +24,10 @@ const PomodoroApp = (() => {
     rounds: 4,
   };
 
+  // 本专注期 agent 活动（主进程经 state:agent-activity 推送，不持久化）
+  let agentActivity = { toolCalls: 0, interruptions: 0, stops: 0, sessions: 0 };
+  let gatewayState = { enabled: false, port: null, hookPath: null };
+
   // ---- DOM 引用 ----
   const $ = (id) => document.getElementById(id);
   const dom = {
@@ -55,6 +59,10 @@ const PomodoroApp = (() => {
     sLong: $('sLong'),
     sRounds: $('sRounds'),
     sAuto: $('sAuto'),
+    sGateway: $('sGateway'),
+    agentMeta: $('agentMeta'),
+    btnCopyHook: $('btnCopyHook'),
+    agentActivity: $('agentActivity'),
   };
 
   const RING_CIRCUM = 615.75; // 2π·98
@@ -154,6 +162,7 @@ const PomodoroApp = (() => {
       document.body.classList.remove('phase-work', 'phase-break', 'phase-longBreak');
       document.body.classList.add(`phase-${state.phase}`);
       dom.phaseLabel.textContent = PHASE_META[state.phase].label;
+      updateAgentActivityUI();
       // 同步阶段 Tab 高亮（跳过/托盘/自动切换阶段时不经过 Tab 点击）
       dom.phaseTabs.querySelectorAll('.phase-tab').forEach((t) => {
         t.classList.toggle('active', t.dataset.phase === state.phase);
@@ -234,6 +243,12 @@ const PomodoroApp = (() => {
       running: state.running,
       phase: state.phase,
       timeLeftText: fmt(state.remainMs),
+      // 完整状态供主进程缓存（agent 网关 /api/status 查询）
+      remainMs: state.remainMs,
+      totalMs: state.totalMs,
+      completedFocus: state.completedFocus,
+      roundInCycle: state.roundInCycle,
+      rounds: state.rounds,
     });
   }
 
@@ -281,13 +296,14 @@ const PomodoroApp = (() => {
     const was = state.phase;
     if (was === 'work') {
       state.completedFocus += 1;
+      const stats = agentStatsSuffix();
       // 决定进入短休还是长休
       if (state.completedFocus % state.rounds === 0) {
         setPhase('longBreak');
-        notify('work', '专注完成！', '干得漂亮！进入长休息', `已完成 ${state.completedFocus} 个番茄`);
+        notify('work', '专注完成！', '干得漂亮！进入长休息', `已完成 ${state.completedFocus} 个番茄${stats}`);
       } else {
         setPhase('break');
-        notify('work', '专注完成！', '太棒了，休息一下再继续', `已完成 ${state.completedFocus} 个番茄`);
+        notify('work', '专注完成！', '太棒了，休息一下再继续', `已完成 ${state.completedFocus} 个番茄${stats}`);
       }
       // 自动进入下一阶段
       if (state.autoNext) {
@@ -323,6 +339,39 @@ const PomodoroApp = (() => {
     const api = window.pomodoro;
     if (!api) return;
     api.showNotify({ type, title, message, sub });
+  }
+
+  // ---- Agent 活动（hook 上报）----
+  function updateAgentActivityUI() {
+    const a = agentActivity;
+    const show = state.phase === 'work' && (a.toolCalls > 0 || a.interruptions > 0);
+    dom.agentActivity.hidden = !show;
+    if (show) {
+      dom.agentActivity.textContent = `🤖 工具 ${a.toolCalls} · 打断 ${a.interruptions}`;
+    }
+  }
+
+  // 专注结束通知的统计后缀（无活动时为空串）
+  function agentStatsSuffix() {
+    const a = agentActivity;
+    if (a.toolCalls <= 0 && a.interruptions <= 0) return '';
+    const parts = [];
+    if (a.toolCalls > 0) parts.push(`🤖 工具×${a.toolCalls}`);
+    if (a.interruptions > 0) parts.push(`打断×${a.interruptions}`);
+    return ` · ${parts.join(' ')}`;
+  }
+
+  // Claude Code settings.json 的 hooks 片段（复制给用户粘贴）
+  function buildHookSnippet(hookPath) {
+    const cmd = `node "${hookPath}"`;
+    return JSON.stringify({
+      hooks: {
+        Notification: [{ hooks: [{ type: 'command', command: cmd }] }],
+        Stop: [{ hooks: [{ type: 'command', command: cmd }] }],
+        SubagentStop: [{ hooks: [{ type: 'command', command: cmd }] }],
+        PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+      },
+    }, null, 2);
   }
 
   // ---- 事件绑定 ----
@@ -495,6 +544,35 @@ const PomodoroApp = (() => {
     root.addEventListener('pointerleave', () => {
       if (!dockState.hidden && dockState.edge) window.pomodoro.dockHide();
     });
+
+    // Agent 网关：状态回推 + 开关 + 复制 hook 配置
+    window.pomodoro.onGatewayState((gs) => {
+      gatewayState = gs || {};
+      dom.sGateway.checked = !!gatewayState.enabled;
+      dom.agentMeta.textContent = gatewayState.enabled
+        ? `端口 ${gatewayState.port} · 运行中`
+        : '已停用';
+      if (gatewayState.activity) {
+        agentActivity = gatewayState.activity;
+        updateAgentActivityUI();
+      }
+    });
+    dom.sGateway.addEventListener('change', () => {
+      window.pomodoro.setGatewayEnabled(dom.sGateway.checked);
+    });
+    dom.btnCopyHook.addEventListener('click', () => {
+      if (!gatewayState.hookPath) return;
+      window.pomodoro.copyText(buildHookSnippet(gatewayState.hookPath));
+      dom.btnCopyHook.textContent = '已复制 ✓';
+      setTimeout(() => { dom.btnCopyHook.textContent = '复制 Hook 配置'; }, 1500);
+    });
+    window.pomodoro.onAgentActivity((a) => {
+      if (a) {
+        agentActivity = a;
+        updateAgentActivityUI();
+      }
+    });
+    window.pomodoro.requestGatewayState();
 
     // 快捷键：空格 开始/暂停，R 重置（输入框聚焦或按键重复时不触发）
     window.addEventListener('keydown', (e) => {

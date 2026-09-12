@@ -87,6 +87,9 @@
 
     <!-- 会话计数圆点 -->
     <div class="round-dots" id="roundDots"></div>
+
+    <!-- 本专注期 agent 活动（Claude Code / OpenCode 等 hook 上报） -->
+    <div class="agent-activity" id="agentActivity" hidden></div>
   </main>
 
   <!-- 控制按钮 -->
@@ -156,6 +159,21 @@
           <span class="slider"></span>
         </label>
       </div>
+
+      <div class="drawer-divider"></div>
+      <div class="drawer-section-title">Agent 集成</div>
+      <div class="setting-row toggle-row">
+        <label for="sGateway">启用 Agent 网关</label>
+        <label class="switch">
+          <input type="checkbox" id="sGateway" />
+          <span class="slider"></span>
+        </label>
+      </div>
+      <div class="setting-row agent-row">
+        <span class="agent-meta" id="agentMeta">检测中…</span>
+        <button class="copy-btn" id="btnCopyHook" title="复制 Claude Code hook 配置片段">复制 Hook 配置</button>
+      </div>
+
       <button class="drawer-save" id="drawerSave">保存设置</button>
     </div>
   </div>
