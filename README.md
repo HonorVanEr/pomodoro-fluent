@@ -50,12 +50,13 @@ npm start
 | 点击 **Tab**（专注/短休/长休） | 手动切换阶段 |
 | 点击 **📌 图钉** | 收成迷你悬浮小窗（置顶）；悬停小窗浮出 重置/开始·暂停/跳过 按钮；点时间展开回完整窗口 |
 | 拖动迷你小窗**到屏幕边缘** | 贴边吸附，收起成进度细条；悬停细条滑出，拖离边缘取消吸附 |
-| 点击 **⚙ 齿轮** | 打开时长设置 |
+| 点击 **⚙ 齿轮** | 打开设置（时长 / 自动循环 / Agent 集成） |
 | 点击 **— 最小化** | 最小化到系统托盘 |
 | 点击 **✕ 关闭** | 隐藏到托盘，后台继续计时 |
 | **空格键** | 快速开始/暂停 |
 | **R 键** | 快速重置（含轮次） |
 | **双击托盘图标** | 显示主窗口（迷你/贴边态会先展开完整窗口） |
+| 设置抽屉 → **复制 Hook 配置** | 一键生成 Claude Code hooks 配置片段（含本机 hook 脚本路径） |
 
 ### 托盘菜单
 右键托盘图标可：显示主窗口 / 开始-暂停 / 重置 / 跳到下一阶段 / 退出。
@@ -63,9 +64,31 @@ npm start
 ### 后台运行
 应用关闭窗口后不会退出，而是隐藏在系统托盘（任务栏右侧的 🍅 图标），计时继续，到点照常弹窗提醒。**退出请在托盘右键菜单选择「退出」。**
 
+## 🤖 Agent 集成（Claude Code / OpenCode）
+
+应用运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址 + 随机 token 鉴权），让 AI 编程工具与番茄钟联动：
+
+- **需要确认 / 权限审批 / 任务完成时弹窗提醒** —— 人不在终端前也能看到
+- **弹窗远程批准**：开启 PreToolUse 双向确认后，可在弹窗上直接点「允许 / 拒绝」，决策回传给 Claude Code（超时安全回退，不会误放行）
+- **专注期活动统计**：主窗口显示 `🤖 工具 N · 打断 M`，专注结束弹窗汇总本期 agent 产出
+- **休息建议**：agent 跑完任务而你仍在专注时段，弹窗建议趁机休息，一键跳到休息
+
+**Claude Code 三步接入**：应用保持运行 → 打开设置抽屉点击「复制 Hook 配置」→ 把片段粘贴进 `~/.claude/settings.json` 的 `hooks` 字段。应用会自动把 hook 脚本安装到 `%APPDATA%\番茄钟\hook\pomodoro-hook.js`，配置一次即可。
+
+任意脚本也能直接调用（token 见 `%APPDATA%\番茄钟\gateway.json`）：
+
+```bash
+curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+  -d '{"title":"构建完成","message":"可以回来验收了"}' \
+  http://127.0.0.1:5277/api/notify
+```
+
+OpenCode 插件接入、远程允许/拒绝、HTTP API 全量说明见 **[Agent 集成指南](docs/agent-hooks.md)**。
+
 ## 🛠️ 技术实现
 
 - **主进程**（`main.js`）：窗口管理、系统托盘、通知弹窗、单实例锁
+- **Agent 网关**（`gateway.js`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；双向确认经长轮询回传决策；hook CLI（`bin/pomodoro-hook.js`）零依赖，应用未运行时静默退出，绝不阻断 agent
 - **迷你悬浮 & 贴边隐藏**：手动光标跟随拖拽（原生 drag 区会吞掉 `:hover`）；贴边收起时窗口带透明留白绕开 Windows 约 32×39 的最小窗口限制，仅靠屏幕边缘的 6px 绘制进度条，透明区域完全穿透（可见性与点击均不受影响）
 - **渲染进程**（`renderer/`）：Win11 风格 UI + 番茄钟逻辑
 - **安全桥接**（`preload.js`）：contextBridge 隔离
@@ -86,12 +109,12 @@ npm i -D electron-builder --registry=https://registry.npmmirror.com
 # 打包为便携目录（快速验证，输出 dist/win-unpacked）
 npm run pack:dir
 
-# 打包 Windows 安装包（NSIS，输出 dist/番茄钟-Setup-1.0.0.exe）
+# 打包 Windows 安装包（NSIS，输出 dist/Pomodoro-Fluent-Setup-1.0.1.exe）
 npm run pack
 ```
 
 打包产物位于 `dist/` 目录：
-- `番茄钟-Setup-1.0.0.exe` —— 安装程序（含桌面/开始菜单快捷方式，可选安装目录）
+- `Pomodoro-Fluent-Setup-1.0.1.exe` —— 安装程序（含桌面/开始菜单快捷方式，可选安装目录；纯英文产物名，GitHub Release 附件名不支持中文）
 - `win-unpacked/番茄钟.exe` —— 免安装便携版（直接运行）
 
 > 打包需要联网下载 NSIS 等工具，若速度慢可设置镜像：
