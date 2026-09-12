@@ -1,9 +1,10 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, Notification } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, Notification, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
+const { createGateway } = require('./gateway');
 
 // ---------------------------------------------------------------------------
 // 全局状态
@@ -251,6 +252,11 @@ function showNotify(payload) {
   const title = data.title || '时间到';
   const message = data.message || '';
   const type = data.type || 'work';
+  const sub = data.sub || '';
+  const mode = data.mode === 'confirm' ? 'confirm' : 'notify';
+  const confirmId = mode === 'confirm' ? (data.confirmId || '') : '';
+  const actions = mode === 'confirm' && Array.isArray(data.actions) ? data.actions : [];
+  const timeoutMs = Number(data.timeoutMs) > 0 ? Math.round(Number(data.timeoutMs)) : 0;
 
   // 如果已经有通知窗口，先关掉旧的
   if (notifyWindow && !notifyWindow.isDestroyed()) {
@@ -260,7 +266,8 @@ function showNotify(payload) {
 
   const nw = new BrowserWindow({
     width: 400,
-    height: 170,
+    // 确认模式多一行按钮
+    height: mode === 'confirm' ? 226 : 170,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -286,7 +293,12 @@ function showNotify(payload) {
 
   // 通过 query 传数据（简单可靠）
   nw.loadFile(path.join(__dirname, 'renderer', 'notify.html'), {
-    query: { title, message, type },
+    query: {
+      title, message, type, sub,
+      mode, confirmId,
+      actions: JSON.stringify(actions),
+      timeoutMs: String(timeoutMs),
+    },
   });
 
   nw.once('ready-to-show', () => {
@@ -620,9 +632,29 @@ ipcMain.on('notify:show', (_e, payload) => {
 // 托盘当前已同步的状态（用于去重，避免重复的原生调用）
 let traySync = { phase: null, running: null, timeText: null };
 
+// 渲染进程上报的完整定时器状态快照（agent 网关 /api/status 使用）
+let lastTimerState = {
+  phase: 'work', running: false, remainMs: 0, totalMs: 0,
+  completedFocus: 0, roundInCycle: 1, rounds: 4,
+};
+
 ipcMain.on('tray:update', (_e, state) => {
-  if (!tray) return;
   const s = state || {};
+  // 缓存完整状态（托盘未就绪时也要缓存，供网关查询）
+  if (s.phase) {
+    lastTimerState = {
+      ...lastTimerState,
+      phase: s.phase,
+      running: !!s.running,
+      remainMs: typeof s.remainMs === 'number' ? s.remainMs : lastTimerState.remainMs,
+      totalMs: typeof s.totalMs === 'number' ? s.totalMs : lastTimerState.totalMs,
+      completedFocus: typeof s.completedFocus === 'number' ? s.completedFocus : lastTimerState.completedFocus,
+      roundInCycle: typeof s.roundInCycle === 'number' ? s.roundInCycle : lastTimerState.roundInCycle,
+      rounds: typeof s.rounds === 'number' ? s.rounds : lastTimerState.rounds,
+    };
+    if (gateway) gateway.observeTimerState(lastTimerState);
+  }
+  if (!tray) return;
   const phase = s.phase || 'idle';
   const running = !!s.running;
   const timeText = s.timeLeftText || '';
@@ -647,10 +679,122 @@ ipcMain.on('tray:update', (_e, state) => {
   }
 });
 
-ipcMain.on('notify:close', () => {
-  if (notifyWindow && !notifyWindow.isDestroyed()) {
-    notifyWindow.close();
+ipcMain.on('notify:close', (e) => {
+  // 用户手动关闭确认弹窗：把挂起的确认按 dismissed 兜底返回（HTTP 调用方不再等待）
+  if (gateway) gateway.dismissPending('dismissed');
+  // 按请求来源窗口精确关闭：被顶掉的旧弹窗的自动关闭定时器晚触发时，
+  // 不能误关当前正在展示的新弹窗
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (win && !win.isDestroyed()) win.close();
+});
+
+// ---------------------------------------------------------------------------
+// Agent 网关：本地 HTTP 服务（Claude Code / OpenCode hooks 对接）
+// 开关持久化在 userData/config.json，主进程启动即读（不依赖渲染进程）
+// ---------------------------------------------------------------------------
+let gateway = null;
+
+function configPath() {
+  return path.join(app.getPath('userData'), 'config.json');
+}
+function loadConfig() {
+  try { return JSON.parse(fs.readFileSync(configPath(), 'utf8')); } catch (e) { return {}; }
+}
+function saveConfig(patch) {
+  const merged = { ...loadConfig(), ...patch };
+  try {
+    fs.mkdirSync(app.getPath('userData'), { recursive: true });
+    fs.writeFileSync(configPath(), JSON.stringify(merged, null, 2));
+  } catch (e) { /* ignore */ }
+  return merged;
+}
+
+// hook CLI 安装到固定路径：userData/hook/pomodoro-hook.js，
+// hook 配置引用该路径即可与仓库/安装位置解耦
+function hookScriptPath() {
+  return path.join(app.getPath('userData'), 'hook', 'pomodoro-hook.js');
+}
+function installHookScript() {
+  try {
+    const src = path.join(__dirname, 'bin', 'pomodoro-hook.js');
+    const buf = fs.readFileSync(src);
+    const dst = hookScriptPath();
+    fs.mkdirSync(path.dirname(dst), { recursive: true });
+    if (!fs.existsSync(dst) || !buf.equals(fs.readFileSync(dst))) {
+      fs.writeFileSync(dst, buf);
+    }
+    return dst;
+  } catch (e) {
+    console.error('[gateway] 安装 hook 脚本失败:', e.message);
+    return null;
   }
+}
+
+function pushGatewayState() {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+  mainWindow.webContents.send('state:gateway', {
+    enabled: !!(gateway && gateway.isRunning()),
+    port: gateway ? gateway.getPort() : null,
+    hookPath: hookScriptPath(),
+    activity: gateway ? gateway.getActivity() : null,
+  });
+}
+
+function startGateway() {
+  if (gateway) return;
+  gateway = createGateway({
+    showPopup: showNotify,
+    sendTimerCommand: (cmd) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tray:command', cmd);
+    },
+    onActivity: (a) => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('state:agent-activity', a);
+    },
+    getTimerState: () => lastTimerState,
+    getUserDataPath: () => app.getPath('userData'),
+    log: (...args) => console.log(...args),
+  });
+  gateway.start().then(() => {
+    pushGatewayState();
+    if (process.env.POMODORO_GATEWAY_SMOKE === '1') gateway.smoke();
+  }).catch((err) => {
+    console.error('[gateway] 启动失败:', err.message);
+    gateway = null;
+    pushGatewayState();
+  });
+}
+
+function stopGateway() {
+  if (gateway) {
+    gateway.stop();
+    gateway = null;
+  }
+  pushGatewayState();
+}
+
+ipcMain.on('gateway:set-enabled', (_e, enabled) => {
+  saveConfig({ gatewayEnabled: !!enabled });
+  if (enabled) startGateway();
+  else stopGateway();
+});
+
+ipcMain.on('gateway:get-state', () => {
+  pushGatewayState();
+});
+
+// 确认弹窗按钮点击 → 网关 resolve → 关闭该弹窗（按来源窗口定位）
+ipcMain.on('confirm:respond', (e, payload) => {
+  const p = payload || {};
+  const resolved = gateway ? gateway.resolveConfirm(p.id, p.action, 'user') : false;
+  if (resolved) {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win && !win.isDestroyed()) win.close();
+  }
+});
+
+// 渲染进程请求写剪贴板（复制 hook 配置片段）
+ipcMain.on('clipboard:write', (_e, text) => {
+  try { clipboard.writeText(String(text || '')); } catch (e) { /* ignore */ }
 });
 
 // ---------------------------------------------------------------------------
@@ -662,6 +806,10 @@ app.whenReady().then(() => {
 
   createMainWindow();
   createTray();
+
+  // Agent 网关（hooks 对接）：安装 hook 脚本 + 按配置启动
+  installHookScript();
+  if (loadConfig().gatewayEnabled !== false) startGateway();
 
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
@@ -680,6 +828,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', () => {
   isQuitting = true;
+  stopGateway();
 });
 
 // ---------------------------------------------------------------------------
