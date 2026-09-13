@@ -186,6 +186,14 @@
         <button class="copy-btn" id="btnCopyHook" title="复制所选 agent 的 hook 配置片段">复制配置</button>
         <button class="copy-btn" id="btnCopyInstall" title="复制一键安装命令（在本机终端执行）">复制安装命令</button>
       </div>
+      <div class="setting-row agent-row">
+        <button class="copy-btn primary" id="btnInstallHook" title="直接在本机写入所选 agent 的 hook 配置（原文件自动备份）">一键安装</button>
+        <label class="install-clean" title="同时清掉指向番茄钟 hook 其它副本的旧条目，避免同一事件跑两遍">
+          <input type="checkbox" id="installClean" checked />
+          <span>清理旧条目</span>
+        </label>
+      </div>
+      <div class="install-result" id="installResult" hidden></div>
 
       <button class="drawer-save" id="drawerSave">保存设置</button>
     </div>

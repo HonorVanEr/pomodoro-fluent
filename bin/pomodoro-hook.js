@@ -1246,9 +1246,14 @@ function writeJson(file, obj, print) {
   }
   try {
     if (fs.existsSync(file)) fs.copyFileSync(file, `${file}.pomodoro.bak`);
-  } catch (e) { /* ignore */ }
-  fs.mkdirSync(path.dirname(file), { recursive: true });
-  fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  } catch (e) { /* 备份失败不阻断安装 */ }
+  // 写失败要抛出去，让 runInstall 记成失败并非零退出（一键安装靠退出码判断）
+  try {
+    fs.mkdirSync(path.dirname(file), { recursive: true });
+    fs.writeFileSync(file, JSON.stringify(obj, null, 2));
+  } catch (e) {
+    throw new Error(`写入 ${file} 失败：${e && e.message ? e.message : e}`);
+  }
   process.stdout.write(`已写入 ${file}（原文件备份为 ${path.basename(file)}.pomodoro.bak）\n`);
 }
 
@@ -1453,8 +1458,7 @@ function installOpencode(print) {
   const cfgFile = path.join(cfgDir, 'opencode.json');
 
   if (!fs.existsSync(pluginSrc)) {
-    process.stderr.write(`[pomodoro-hook] 找不到插件源文件: ${pluginSrc}\n`);
-    return;
+    throw new Error(`找不到插件源文件: ${pluginSrc}`);
   }
   if (print) {
     process.stdout.write(`--- 复制 ${pluginSrc} → ${pluginDst} ---\n`);
@@ -1471,24 +1475,47 @@ function installOpencode(print) {
   writeJson(cfgFile, cfg, print);
 }
 
+// 支持的宿主列表（install 与帮助文本共用一份，别两处各写一遍）
+const HOOK_AGENT_NAMES = ['zcode', 'claude', 'vscode', 'trae', 'cursor', 'opencode', 'codex', 'qwen'];
+
 function runInstall(args) {
   const print = args.includes('--print');
   CLEAN_STALE = args.includes('--clean');
   const idx = args.indexOf('--agent');
   const agent = (idx >= 0 && args[idx + 1]) || 'all';
-  const all = ['zcode', 'claude', 'vscode', 'trae', 'cursor', 'opencode', 'codex', 'qwen'];
-  const targets = agent === 'all' ? all : [agent];
+
+  // 未知宿主必须非零退出：设置面板的「一键安装」靠退出码判断成败，
+  // 以前这里只往 stderr 写一行就继续，会被误报成"安装完成"
+  if (agent !== 'all' && !HOOK_AGENT_NAMES.includes(agent)) {
+    process.stderr.write(`[pomodoro-hook] 未知 agent: ${agent}（可选：${HOOK_AGENT_NAMES.join(' / ')} / all）\n`);
+    process.exitCode = 1;
+    return;
+  }
+
+  const targets = agent === 'all' ? HOOK_AGENT_NAMES : [agent];
+  const failed = [];
   targets.forEach((t) => {
-    if (t === 'claude') installClaude(print);
-    else if (t === 'zcode') installZcode(print);
-    else if (t === 'vscode') installVscode(print);
-    else if (t === 'trae') installTrae(print);
-    else if (t === 'cursor') installCursor(print);
-    else if (t === 'opencode') installOpencode(print);
-    else if (t === 'codex') installCodex(print);
-    else if (t === 'qwen') installQwen(print);
-    else process.stderr.write(`[pomodoro-hook] 未知 agent: ${t}（可选：${all.join(' / ')} / all）\n`);
+    try {
+      if (t === 'claude') installClaude(print);
+      else if (t === 'zcode') installZcode(print);
+      else if (t === 'vscode') installVscode(print);
+      else if (t === 'trae') installTrae(print);
+      else if (t === 'cursor') installCursor(print);
+      else if (t === 'opencode') installOpencode(print);
+      else if (t === 'codex') installCodex(print);
+      else if (t === 'qwen') installQwen(print);
+    } catch (e) {
+      failed.push(t);
+      process.stderr.write(`[pomodoro-hook] 安装 ${t} 失败：${e && e.message ? e.message : e}\n`);
+    }
   });
+
+  // 写盘失败也必须非零退出（权限、磁盘满、目录被占用…），否则前端会误报成功
+  if (failed.length) {
+    process.stderr.write(`[pomodoro-hook] 有 ${failed.length} 个宿主安装失败：${failed.join('、')}\n`);
+    process.exitCode = 1;
+    return;
+  }
   if (!print) process.stdout.write('改动需重启对应 agent 会话后生效。\n');
 }
 

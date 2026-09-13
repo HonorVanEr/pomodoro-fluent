@@ -64,6 +64,9 @@ const PomodoroApp = (() => {
     agentSelect: $('agentSelect'),
     btnCopyHook: $('btnCopyHook'),
     btnCopyInstall: $('btnCopyInstall'),
+    btnInstallHook: $('btnInstallHook'),
+    installClean: $('installClean'),
+    installResult: $('installResult'),
     agentActivity: $('agentActivity'),
   };
 
@@ -476,6 +479,78 @@ const PomodoroApp = (() => {
     return `node "${hookPath}" install --agent ${agent}`;
   }
 
+  // ---- 一键安装结果面板 ----
+  // 成功：列出写入的配置文件 + 生效条件；失败：给出原因和可复制的命令行
+  const AGENT_LABELS = {
+    zcode: 'ZCode', claude: 'Claude Code', vscode: 'VS Code Copilot', trae: 'Trae',
+    cursor: 'Cursor', opencode: 'OpenCode', codex: 'Codex CLI', qwen: 'Qwen Code', all: '全部宿主',
+  };
+
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  // 按钮短暂显示反馈后复原（复制/安装按钮共用）
+  function flash(btn, text, ms = 1500) {
+    if (!btn) return;
+    const old = btn.dataset.label || btn.textContent;
+    btn.dataset.label = old;
+    btn.textContent = text;
+    setTimeout(() => { btn.textContent = btn.dataset.label; }, ms);
+  }
+
+  function renderInstallResult(res) {
+    const box = dom.installResult;
+    if (!box) return;
+    box.innerHTML = '';
+    box.hidden = false;
+
+    box.appendChild(el('div', 'install-head ' + (res.ok ? 'ok' : 'fail'),
+      res.ok ? `✓ 已安装（${AGENT_LABELS[res.agent] || res.agent}）` : '✗ 安装失败'));
+    box.appendChild(el('div', 'install-msg', res.message || ''));
+
+    if (res.ok) {
+      if (res.nodeMissing) {
+        box.appendChild(el('div', 'install-warn',
+          '⚠ 没检测到 node 命令：配置已经写好了，但 hook 运行时要靠 node 拉起脚本，' +
+          '请先装 Node.js（或把它加进 PATH），否则 agent 那边不会弹窗。'));
+      }
+      // CLI 打印的注意事项（沙箱运行、与 Claude Code 双跑之类）提到面板上，别埋进日志
+      if (res.notes) box.appendChild(el('div', 'install-warn', res.notes));
+      box.appendChild(el('div', 'install-hint',
+        '重启对应的 agent / 编辑器后生效（VS Code、Trae、Cursor 会热加载配置，Claude Code 需要重开会话）。'));
+    } else {
+      // 退路：手动执行等价的命令
+      box.appendChild(el('div', 'install-hint', '可以在终端里手动执行下面这条命令，效果一样：'));
+      const code = el('code', 'install-cmd', res.command || '');
+      box.appendChild(code);
+      const copy = el('button', 'copy-btn small', '复制命令');
+      copy.addEventListener('click', () => {
+        window.pomodoro.copyText(res.command || '');
+        flash(copy, '已复制 ✓');
+      });
+      box.appendChild(copy);
+      if (res.command) {
+        box.appendChild(el('div', 'install-hint',
+          '提示：命令里的 hook 脚本路径若不存在，说明应用没能把脚本释放到用户目录，' +
+          '可先用管理员权限或换一台磁盘可写的机器重试。'));
+      }
+    }
+
+    if (res.log) {
+      const d = document.createElement('details');
+      d.className = 'install-log';
+      const s = document.createElement('summary');
+      s.textContent = '查看日志';
+      d.appendChild(s);
+      d.appendChild(el('pre', '', res.log));
+      box.appendChild(d);
+    }
+  }
+
   // ---- 事件绑定 ----
   function bindEvents() {
     // 阶段切换（未运行时）
@@ -662,14 +737,16 @@ const PomodoroApp = (() => {
     dom.sGateway.addEventListener('change', () => {
       window.pomodoro.setGatewayEnabled(dom.sGateway.checked);
     });
-    const flash = (btn, text) => {
-      const old = btn.dataset.label || btn.textContent;
-      btn.dataset.label = old;
-      btn.textContent = text;
-      setTimeout(() => { btn.textContent = btn.dataset.label; }, 1500);
-    };
 
     const currentAgent = () => (dom.agentSelect ? dom.agentSelect.value : 'claude');
+
+    // 切换宿主后把上一次的安装结果收起来，免得看着像"已经装过了"
+    if (dom.agentSelect && dom.installResult) {
+      dom.agentSelect.addEventListener('change', () => {
+        dom.installResult.hidden = true;
+        dom.installResult.innerHTML = '';
+      });
+    }
 
     dom.btnCopyHook.addEventListener('click', () => {
       if (!gatewayState.hookPath) return;
@@ -683,6 +760,27 @@ const PomodoroApp = (() => {
       window.pomodoro.copyText(buildInstallCommand(currentAgent(), gatewayState.hookPath));
       flash(dom.btnCopyInstall, '已复制 ✓');
     });
+
+    // 一键安装：主进程直接跑 CLI 写配置；失败则展示命令行让用户自己执行
+    if (dom.btnInstallHook) {
+      dom.btnInstallHook.addEventListener('click', async () => {
+        if (dom.btnInstallHook.disabled) return;
+        const agent = currentAgent();
+        const clean = !!(dom.installClean && dom.installClean.checked);
+        dom.btnInstallHook.disabled = true;
+        flash(dom.btnInstallHook, '安装中…', 20000);
+        try {
+          const res = await window.pomodoro.installHook(agent, clean);
+          dom.btnInstallHook.textContent = '一键安装';
+          renderInstallResult(res || { ok: false, agent, message: '主进程没有返回结果' });
+        } catch (e) {
+          dom.btnInstallHook.textContent = '一键安装';
+          renderInstallResult({ ok: false, agent, message: '安装调用异常：' + (e && e.message ? e.message : e) });
+        } finally {
+          dom.btnInstallHook.disabled = false;
+        }
+      });
+    }
     window.pomodoro.onAgentActivity((a) => {
       if (a) {
         agentActivity = a;

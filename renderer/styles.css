@@ -592,6 +592,88 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 .copy-btn:hover { background: rgba(255, 255, 255, 0.14); }
 .copy-btn:active { transform: scale(0.97); }
+.copy-btn:disabled { opacity: 0.6; cursor: default; transform: none; }
+
+/* 主操作按钮（一键安装） */
+.copy-btn.primary {
+  background: linear-gradient(180deg, var(--accent-a), var(--accent-b));
+  border-color: transparent;
+  color: #23151a;
+  font-weight: 600;
+}
+.copy-btn.primary:hover { filter: brightness(1.06); background: linear-gradient(180deg, var(--accent-a), var(--accent-b)); }
+.copy-btn.small { padding: 4px 8px; font-size: 11px; margin-top: 6px; }
+
+/* 「清理旧条目」勾选 */
+.install-clean {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-dim);
+  font-size: 12px;
+  cursor: pointer;
+  user-select: none;
+}
+.install-clean input { accent-color: var(--accent-a); cursor: pointer; }
+
+/* ---------- 一键安装结果 ---------- */
+.install-result {
+  margin: 0 0 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.install-head { font-weight: 600; margin-bottom: 4px; }
+.install-head.ok { color: #2ed573; }
+.install-head.fail { color: #ff6b6b; }
+.install-msg {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.install-hint { margin-top: 6px; color: var(--text-dim); }
+.install-warn {
+  margin-top: 6px;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(255, 159, 90, 0.12);
+  border: 1px solid rgba(255, 159, 90, 0.3);
+  color: #ffc48a;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.install-cmd {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--card-border);
+  color: #ffd9b0;
+  font-family: Consolas, 'Cascadia Mono', ui-monospace, monospace;
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+  user-select: all;
+}
+.install-log { margin-top: 8px; }
+.install-log > summary { color: var(--text-dim); cursor: pointer; }
+.install-log > pre {
+  margin: 6px 0 0;
+  padding: 8px 10px;
+  max-height: 160px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.28);
+  border: 1px solid var(--card-border);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
 
 .agent-select {
   flex: 0 0 auto;

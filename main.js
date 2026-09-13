@@ -3,6 +3,7 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, Notification, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const os = require('os');
 const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { createGateway } = require('./gateway');
@@ -802,6 +803,119 @@ function installHookScript() {
   }
 }
 
+// ---------------------------------------------------------------------------
+// 一键安装 hook（设置面板点按钮就写配置，不用去终端粘命令）
+//
+// 执行方式：用 Electron 自带的 Node 跑 CLI（ELECTRON_RUN_AS_NODE=1），
+//   这样本机即使没装 node 也能把配置写进去。
+//   但 hook 是 *运行时* 由 agent 用 `node "<脚本>"` 拉起的，所以本机没 node
+//   时配置能装上、执行会失败 —— 下面会探一次并如实告知，不假装成功。
+// 失败时把等价的命令行一并回给渲染层，让用户自己复制执行（退路）。
+// ---------------------------------------------------------------------------
+const HOOK_AGENTS = ['zcode', 'claude', 'vscode', 'trae', 'cursor', 'opencode', 'codex', 'qwen', 'all'];
+
+function manualInstallCommand(agent, clean) {
+  return `node "${hookScriptPath()}" install --agent ${agent}${clean ? ' --clean' : ''}`;
+}
+
+function runHookCli(args, timeoutMs = 20000) {
+  return new Promise((resolve) => {
+    execFile(process.execPath, args, {
+      timeout: timeoutMs,
+      windowsHide: true,
+      env: { ...process.env, ELECTRON_RUN_AS_NODE: '1' },
+      maxBuffer: 4 * 1024 * 1024,
+    }, (err, stdout, stderr) => {
+      // err.code 是数字=退出码；是字符串=压根没起来（ENOENT 之类）
+      const exitCode = err ? (typeof err.code === 'number' ? err.code : -1) : 0;
+      const spawnErr = err && typeof err.code !== 'number' ? String(err.message || err) : '';
+      resolve({ exitCode, spawnErr, stdout: String(stdout || ''), stderr: String(stderr || '') });
+    });
+  });
+}
+
+// hook 运行时要靠 `node` 在 PATH 里；装了才敢说"能用"
+function probeNode() {
+  return new Promise((resolve) => {
+    // 不用 shell：Windows 上 libuv 自己会按 PATHEXT 找到 node.exe，
+    // 而 shell:true + args 在 Node 22 上会报 DEP0190
+    execFile('node', ['--version'], { timeout: 5000, windowsHide: true },
+      (err, stdout) => resolve(err ? '' : String(stdout || '').trim()));
+  });
+}
+
+function extractWrittenFiles(out) {
+  const files = [];
+  let m;
+  const re = /已写入 ([^\r\n（]+)/g;
+  while ((m = re.exec(out))) files.push(m[1].trim());
+  const re2 = /已安装插件 ([^\r\n]+)/g;
+  while ((m = re2.exec(out))) files.push(m[1].trim());
+  return Array.from(new Set(files));
+}
+
+// stdout 里除了「写了哪个文件」之外的说明性文字（沙箱/双跑之类的注意事项），
+// 单独抽出来显示在面板上，别让它埋在折叠的日志里被忽略
+function extractNotes(out) {
+  return String(out || '')
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s
+      && !/^已写入 /.test(s)
+      && !/^已安装插件 /.test(s)
+      && !/^改动需重启/.test(s))
+    .join('\n')
+    .trim();
+}
+
+ipcMain.handle('hook:install', (_e, payload) => runHookInstall(payload));
+
+// 抽成函数，便于冒烟测试直接调用（见文末 POMODORO_SMOKE_INSTALL）
+async function runHookInstall(payload) {
+  const p = payload || {};
+  const agent = HOOK_AGENTS.includes(String(p && p.agent)) ? String(p.agent) : 'claude';
+  const clean = !!(p && p.clean);
+  const command = manualInstallCommand(agent, clean);
+
+  const script = installHookScript();
+  if (!script) {
+    return {
+      ok: false, agent, command, files: [],
+      message: '无法释放 hook 脚本：写用户目录失败（检查磁盘权限/空间）',
+    };
+  }
+
+  const args = [script, 'install', '--agent', agent];
+  if (clean) args.push('--clean');
+  const res = await runHookCli(args);
+
+  const files = extractWrittenFiles(res.stdout);
+  const log = [res.stdout, res.stderr].filter(Boolean).join('\n').trim();
+  const ok = res.exitCode === 0 && !res.spawnErr;
+
+  if (!ok) {
+    const firstErr = String(res.stderr || '').split(/\r?\n/).map((s) => s.trim()).filter(Boolean)[0] || '';
+    return {
+      ok: false, agent, command, files, log,
+      message: res.spawnErr
+        ? `安装进程没能启动：${res.spawnErr}`
+        : `安装失败（退出码 ${res.exitCode}）${firstErr ? '：' + firstErr : ''}`,
+    };
+  }
+
+  const nodeVersion = await probeNode();
+  return {
+    ok: true, agent, command, files, log,
+    notes: extractNotes(res.stdout),
+    nodeVersion,
+    // 配置装上了，但运行时缺 node → 必须提示，不然用户只会看到"配了没反应"
+    nodeMissing: !nodeVersion,
+    message: files.length
+      ? `已写入 ${files.length} 处配置：\n${files.join('\n')}`
+      : '安装完成（未解析到写入路径，展开日志查看详情）',
+  };
+}
+
 function pushGatewayState() {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   mainWindow.webContents.send('state:gateway', {
@@ -925,7 +1039,67 @@ app.whenReady().then(() => {
 
   if (process.env.POMODORO_SMOKE === '1') {
     // 冒烟测试模式：加载完成后自动退出
-    setTimeout(() => { isQuitting = true; app.exit(0); }, 8000);
+    let smokeMs = 8000;
+    // POMODORO_SMOKE_INSTALL=1 时，把「一键安装」从渲染层按钮点到落盘整个链路跑一遍。
+    // 关键：HOME 全程指向临时目录，所以只验证链路是否通，绝不碰本机真实 agent 配置。
+    if (process.env.POMODORO_SMOKE_INSTALL === '1') {
+      smokeMs = 30000;
+      const tmpHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pomodoro-smoke-home-'));
+      const saved = { USERPROFILE: process.env.USERPROFILE, HOME: process.env.HOME, XDG_CONFIG_HOME: process.env.XDG_CONFIG_HOME };
+      const setHome = (h) => {
+        process.env.USERPROFILE = h;
+        process.env.HOME = h;
+        process.env.XDG_CONFIG_HOME = path.join(h, '.config');
+      };
+      setHome(tmpHome);
+
+      // 等页面加载完，再在渲染层里点按钮，读回结果面板的文本
+      const waitLoaded = () => new Promise((resolve) => {
+        if (!mainWindow || mainWindow.isDestroyed()) return resolve(false);
+        if (!mainWindow.webContents.isLoading()) return resolve(true);
+        mainWindow.webContents.once('did-finish-load', () => resolve(true));
+      });
+      const clickInstall = () => mainWindow.webContents.executeJavaScript(`(async () => {
+        const btn = document.getElementById('btnInstallHook');
+        const box = document.getElementById('installResult');
+        const sel = document.getElementById('agentSelect');
+        if (!btn || !box || !sel) return 'missing-dom';
+        if (typeof window.pomodoro.installHook !== 'function') return 'missing-bridge';
+        sel.value = 'trae';
+        sel.dispatchEvent(new Event('change'));
+        btn.click();
+        const t0 = Date.now();
+        while (Date.now() - t0 < 20000) {
+          if (!box.hidden && box.textContent) break;
+          await new Promise((r) => setTimeout(r, 120));
+        }
+        return (box.hidden ? 'hidden|' : 'shown|') + box.textContent.replace(/\\s+/g, ' ').slice(0, 300)
+          + ' [cmd=' + (/install --agent trae/.test(box.textContent) ? 'yes' : 'no') + ']';
+      })()`, true);
+
+      (async () => {
+        try {
+          if (!await waitLoaded()) { console.log('[smoke] 页面未加载，跳过一键安装验证'); return; }
+          console.log('[smoke] 渲染层一键安装（成功路径）→ ' + await clickInstall());
+          // 失败路径：把 HOME 指到「父路径是文件」的位置，写入必然失败
+          const blocker = path.join(tmpHome, 'blocker');
+          fs.writeFileSync(blocker, 'x');
+          setHome(path.join(blocker, 'sub'));
+          console.log('[smoke] 渲染层一键安装（失败路径）→ ' + await clickInstall());
+        } catch (e) {
+          console.log('[smoke] 一键安装冒烟异常:', e && e.message);
+        } finally {
+          Object.entries(saved).forEach(([k, v]) => {
+            if (v === undefined) delete process.env[k]; else process.env[k] = v;
+          });
+          try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+          isQuitting = true;
+          app.exit(0);
+        }
+      })();
+    }
+    // 安全兜底：万一上面的流程卡住，也保证进程能退出
+    setTimeout(() => { isQuitting = true; app.exit(0); }, smokeMs);
   }
 });
 

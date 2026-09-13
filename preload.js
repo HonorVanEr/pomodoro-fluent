@@ -30,6 +30,8 @@ contextBridge.exposeInMainWorld('pomodoro', {
   setGatewayEnabled: (enabled) => ipcRenderer.send('gateway:set-enabled', enabled),
   requestGatewayState: () => ipcRenderer.send('gateway:get-state'),
   copyText: (text) => ipcRenderer.send('clipboard:write', text),
+  // 一键安装 hook：主进程直接跑 CLI 写配置，返回 { ok, message, files, command, log }
+  installHook: (agent, clean) => ipcRenderer.invoke('hook:install', { agent, clean }),
 
   // 托盘状态同步
   updateTray: (state) => ipcRenderer.send('tray:update', state),

@@ -77,7 +77,9 @@ npm start
 
 超时未决策一律落回**拒绝/取消**，手动关窗则回退终端原生询问——不会替你放行。
 
-**一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点「复制安装命令」→ 终端执行，hook 会自动写进配置（原文件自动备份）：
+**一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点 **一键安装**，配置直接写好（原文件自动备份），面板上会告诉你写了哪些文件、有哪些注意事项；**装失败也不用慌**，面板会给出一模一样的命令行让你复制到终端执行。
+
+也可以走命令行（「复制安装命令」按钮复制的是这条）：
 
 ```bash
 node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
@@ -103,6 +105,7 @@ OpenCode 插件接入、远程允许/拒绝、HTTP API 全量说明见 **[Agent 
 
 - **主进程**（`main.js`）：窗口管理、系统托盘、通知弹窗、单实例锁
 - **Agent 网关**（`gateway.js`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；ask / permission / notification 三类交互经长轮询回传决策；hook CLI（`bin/pomodoro-hook.js`）零依赖，应用未运行时静默退出，绝不阻断 agent
+- **一键安装**（`main.js`）：主进程用 Electron 自带的 Node（`ELECTRON_RUN_AS_NODE=1`）跑 hook CLI 写配置，所以本机没装 node 也能装；成败按 CLI 退出码判断（未知宿主 / 写盘失败都非零退出），失败时把等价命令行交还给界面供复制
 - **迷你悬浮 & 贴边隐藏**：手动光标跟随拖拽（原生 drag 区会吞掉 `:hover`）；贴边收起时窗口带透明留白绕开 Windows 约 32×39 的最小窗口限制，仅靠屏幕边缘的 6px 绘制进度条，透明区域完全穿透（可见性与点击均不受影响）
 - **渲染进程**（`renderer/`）：Win11 风格 UI + 番茄钟逻辑
 - **安全桥接**（`preload.js`）：contextBridge 隔离

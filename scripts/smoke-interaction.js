@@ -131,7 +131,7 @@ function runHook(stdinPayload, extraArgs = [], env = {}) {
     child.stdout.on('data', (c) => { out += c; });
     child.stderr.on('data', (c) => { err += c; });
     child.on('error', reject);
-    child.on('close', () => resolve({ out, err }));
+    child.on('close', (code) => resolve({ out, err, code }));
     child.stdin.on('error', () => {}); // 子进程先退出时不至于把父进程带崩
     child.stdin.end(JSON.stringify(stdinPayload));
   });
@@ -679,10 +679,78 @@ async function run() {
   out = parseOut(res.out);
   ok('opencode-question 取消 → reject', out && out.reject === true, res);
 
-  console.log('\n[4] 收尾');
+  console.log('\n[4] 一键安装（设置面板按钮走的同一条 CLI 路径）');
+
+  // 把 HOME 重定向到临时目录，验证 install 真能写出配置，且不碰本机真实配置
+  const fakeHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pomodoro-home-'));
+  const homeEnv = { USERPROFILE: fakeHome, HOME: fakeHome, XDG_CONFIG_HOME: path.join(fakeHome, '.config') };
+
+  res = await runHook({}, ['install', '--agent', 'trae'], homeEnv);
+  const traeFile = path.join(fakeHome, '.trae-cn', 'hooks.json');
+  let traeCfg = null;
+  try { traeCfg = JSON.parse(fs.readFileSync(traeFile, 'utf8')); } catch (e) { /* 断言会失败 */ }
+  ok('install --agent trae 写出 ~/.trae-cn/hooks.json（退出码 0）',
+    res.out.includes('已写入') && traeCfg && traeCfg.version === 1, res);
+  ok('install 写出的 PreToolUse 带 matcher + timeout=600（秒）',
+    traeCfg && traeCfg.hooks && traeCfg.hooks.PreToolUse
+      && /RunCommand/.test(traeCfg.hooks.PreToolUse[0].matcher || '')
+      && traeCfg.hooks.PreToolUse[0].hooks[0].timeout === 600, traeCfg && traeCfg.hooks);
+
+  // VS Code 那边要写 timeout（不是 timeoutSec），且覆盖 8 个事件
+  res = await runHook({}, ['install', '--agent', 'vscode'], homeEnv);
+  const vsFile = path.join(fakeHome, '.copilot', 'hooks', 'pomodoro.json');
+  let vsCfg = null;
+  try { vsCfg = JSON.parse(fs.readFileSync(vsFile, 'utf8')); } catch (e) { /* 断言会失败 */ }
+  ok('install --agent vscode 写出 ~/.copilot/hooks/pomodoro.json',
+    vsCfg && vsCfg.hooks && Object.keys(vsCfg.hooks).length === 8, vsCfg && vsCfg.hooks);
+  ok('VS Code 配置用 timeout（不是 timeoutSec）且 PreToolUse=600',
+    vsCfg && vsCfg.hooks.PreToolUse[0].timeout === 600
+      && !('timeoutSec' in vsCfg.hooks.PreToolUse[0]), vsCfg && vsCfg.hooks.PreToolUse[0]);
+
+  // 重复安装要幂等：同一条目不重复追加
+  await runHook({}, ['install', '--agent', 'trae'], homeEnv);
+  const traeAgain = JSON.parse(fs.readFileSync(traeFile, 'utf8'));
+  ok('重复安装幂等（PreToolUse 仍只有 1 条）',
+    traeAgain.hooks.PreToolUse.length === 1, traeAgain.hooks.PreToolUse);
+
+  // --clean 要清掉指向别的副本的旧条目（否则同一次调用会跑两遍）
+  traeAgain.hooks.PreToolUse.push({
+    matcher: 'RunCommand',
+    hooks: [{ type: 'command', command: 'node "D:\\\\old\\\\pomodoro-hook.js" --source trae', timeout: 600 }],
+  });
+  fs.writeFileSync(traeFile, JSON.stringify(traeAgain, null, 2));
+  await runHook({}, ['install', '--agent', 'trae', '--clean'], homeEnv);
+  const traeCleaned = JSON.parse(fs.readFileSync(traeFile, 'utf8'));
+  ok('--clean 清掉指向其它副本的旧条目（只剩当前安装路径）',
+    traeCleaned.hooks.PreToolUse.length === 1
+      && !/old/.test(JSON.stringify(traeCleaned.hooks.PreToolUse)), traeCleaned.hooks.PreToolUse);
+
+  // 未知宿主必须非零退出 —— 前端「一键安装」靠退出码判断成败，不能误报成功
+  res = await runHook({}, ['install', '--agent', 'no-such-agent'], homeEnv);
+  ok('install 未知宿主 → 非零退出码（前端才能识别为失败）',
+    res.code !== 0 && /未知 agent/.test(res.err || ''), { code: res.code, err: res.err });
+
+  // 写盘失败也要非零退出：把目标做成"父路径是文件"，mkdir 必然失败
+  const blocker = path.join(fakeHome, 'blocked');
+  fs.writeFileSync(blocker, 'not a directory');
+  const badHome = fs.mkdtempSync(path.join(os.tmpdir(), 'pomodoro-badhome-'));
+  fs.mkdirSync(path.join(badHome, '.claude'), { recursive: true });
+  fs.writeFileSync(path.join(badHome, '.claude', 'settings.json'), '{}');
+  // 用只读文件系统不好造，这里改测「父路径被文件占位」：把 .trae-cn 建成文件
+  fs.writeFileSync(path.join(badHome, '.trae-cn'), 'not a directory');
+  res = await runHook({}, ['install', '--agent', 'trae'],
+    { USERPROFILE: badHome, HOME: badHome, XDG_CONFIG_HOME: path.join(badHome, '.config') });
+  ok('install 写盘失败 → 非零退出码 + 明确报错',
+    res.code !== 0 && /失败/.test(res.err || ''), { code: res.code, err: res.err });
+  void blocker;
+
+  console.log('\n[5] 收尾');
   const status = await getStatus();
   ok('无挂起交互泄漏', status.pending === 0, status);
   ok('打断计数已累计', status.activity.interruptions > 0, status.activity);
+
+  try { fs.rmSync(fakeHome, { recursive: true, force: true }); } catch (e) { /* ignore */ }
+  try { fs.rmSync(badHome, { recursive: true, force: true }); } catch (e) { /* ignore */ }
 
   gateway.stop();
   console.log(`\n结果：${passed} passed, ${failed} failed  (端口 ${port})\n`);
