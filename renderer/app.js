@@ -388,6 +388,54 @@ const PomodoroApp = (() => {
         plugin: [`file://${(pluginPath || '').replace(/\\/g, '/')}`],
       }, null, 2);
     }
+    if (agent === 'vscode') {
+      // VS Code Copilot Agent hooks（1.109+）：与 Claude Code 同格式，
+      // 用户级放 ~/.copilot/hooks/*.json；没有 PermissionRequest，审批走 PreToolUse
+      return JSON.stringify({
+        version: 1,
+        hooks: {
+          PreToolUse: [{ type: 'command', command: cmd('vscode'), timeoutSec: 600 }],
+          SessionStart: [{ type: 'command', command: cmd('vscode') }],
+          UserPromptSubmit: [{ type: 'command', command: cmd('vscode') }],
+          PostToolUse: [{ type: 'command', command: cmd('vscode') }],
+          SubagentStop: [{ type: 'command', command: cmd('vscode') }],
+          Stop: [{ type: 'command', command: cmd('vscode') }],
+        },
+      }, null, 2);
+    }
+    if (agent === 'cursor') {
+      // Cursor：~/.cursor/hooks.json（用户级）或 .cursor/hooks.json（项目级）
+      return JSON.stringify({
+        version: 1,
+        hooks: {
+          beforeShellExecution: [{ command: cmd('cursor'), timeout: 600 }],
+          preToolUse: [{ command: cmd('cursor'), timeout: 600 }],
+          beforeMCPExecution: [{ command: cmd('cursor'), timeout: 600 }],
+          beforeSubmitPrompt: [{ command: cmd('cursor') }],
+          afterFileEdit: [{ command: cmd('cursor') }],
+          afterShellExecution: [{ command: cmd('cursor') }],
+          afterAgentResponse: [{ command: cmd('cursor') }],
+          stop: [{ command: cmd('cursor') }],
+        },
+      }, null, 2);
+    }
+    if (agent === 'codex') {
+      // Codex 只有 notify：回合结束回调一次（无权限决策通道）
+      return [
+        '# ~/.codex/config.toml',
+        `notify = ["node", "${(hookPath || '').replace(/\\/g, '\\\\')}", "codex-notify"]`,
+      ].join('\n');
+    }
+    if (agent === 'qwen') {
+      return JSON.stringify({
+        hooks: {
+          Notification: [{ hooks: [{ type: 'command', command: cmd('qwen') }] }],
+          PreToolUse: [{ matcher: 'AskUserQuestion|askQuestions', hooks: [{ type: 'command', command: cmd('qwen'), timeout: 600 }] }],
+          Stop: [{ hooks: [{ type: 'command', command: cmd('qwen') }] }],
+          PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('qwen') }] }],
+        },
+      }, null, 2);
+    }
     return JSON.stringify({
       hooks: {
         Notification: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],

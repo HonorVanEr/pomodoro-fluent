@@ -335,6 +335,99 @@ async function run() {
     res.out.includes(sess.slice(-6)) && res.out.includes('npm test') && res.out.includes('demo-project'),
     res.out.slice(0, 240));
 
+  console.log('\n[2.7] VS Code Copilot / Cursor / Codex');
+
+  // VS Code（1.109+）：与 Claude Code 同格式（PascalCase + snake_case），
+  // 但没有 PermissionRequest → 审批走 PreToolUse
+  plan = { permission: 'allow' };
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    cwd: path.join(os.tmpdir(), 'vscode-proj'),
+    tool_name: 'runInTerminal',
+    tool_input: { command: 'npm run build' },
+    timestamp: new Date().toISOString(),
+  }, ['--source', 'vscode']);
+  out = parseOut(res.out);
+  ok('VS Code PreToolUse 允许 → permissionDecision=allow',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'allow', res);
+  ok('VS Code 上下文 → 来源标为 vscode',
+    lastPopup && lastPopup.context && lastPopup.context.agent === 'vscode', lastPopup && lastPopup.context);
+
+  // Cursor：beforeShellExecution 拦截命令
+  plan = { permission: 'deny', text: '这条命令先不动' };
+  res = await runHook({
+    hook_event_name: 'beforeShellExecution',
+    conversation_id: `smoke-cursor-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'cursor-proj')],
+    command: 'rm -rf build',
+    cwd: path.join(os.tmpdir(), 'cursor-proj'),
+  }, ['--source', 'cursor']);
+  out = parseOut(res.out);
+  ok('Cursor beforeShellExecution 拒绝 → permission=deny',
+    out && out.permission === 'deny' && /先不动/.test(out.user_message || ''), res);
+
+  plan = { permission: 'allow' };
+  res = await runHook({
+    hook_event_name: 'beforeShellExecution',
+    conversation_id: `smoke-cursor-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'cursor-proj')],
+    command: 'npm test',
+    cwd: path.join(os.tmpdir(), 'cursor-proj'),
+  }, ['--source', 'cursor']);
+  out = parseOut(res.out);
+  ok('Cursor beforeShellExecution 允许 → permission=allow', out && out.permission === 'allow', res);
+
+  // Cursor：afterFileEdit 只计数，不回决策；stop 触发「休息建议」判定
+  res = await runHook({
+    hook_event_name: 'afterFileEdit',
+    conversation_id: `smoke-cursor-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'cursor-proj')],
+    file_path: path.join(os.tmpdir(), 'cursor-proj', 'src/index.ts'),
+  }, ['--source', 'cursor']);
+  ok('Cursor afterFileEdit → 静默（stdout 为空）', res.out.trim() === '', res);
+
+  res = await runHook({
+    hook_event_name: 'beforeSubmitPrompt',
+    conversation_id: `smoke-cursor-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'cursor-proj')],
+    prompt: '把库存扣减改成幂等',
+  }, ['--source', 'cursor']);
+  out = parseOut(res.out);
+  ok('Cursor beforeSubmitPrompt → {continue:true}', out && out.continue === true, res);
+
+  res = await runHook({
+    hook_event_name: 'stop',
+    conversation_id: `smoke-cursor-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'cursor-proj')],
+    status: 'completed',
+    loop_count: 0,
+  }, ['--source', 'cursor']);
+  ok('Cursor stop → 返回 {} 且不触发 followup', res.out.trim() === '{}', res);
+
+  // Cursor 提问：preToolUse + question 工具 → updated_input 注入答案
+  plan = { ask: 'submit', askOption: 0 };
+  res = await runHook({
+    hook_event_name: 'preToolUse',
+    conversation_id: `smoke-cursor-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'cursor-proj')],
+    tool_name: 'askQuestion',
+    tool_input: { question: '用哪个方案？', options: [{ label: '方案 A' }, { label: '方案 B' }] },
+  }, ['--source', 'cursor']);
+  out = parseOut(res.out);
+  ok('Cursor preToolUse 提问 → permission=allow + updated_input.answers',
+    out && out.permission === 'allow' && out.updated_input && out.updated_input.answers, res);
+
+  // Codex：notify 只在回合结束时回调
+  res = await runHook({
+    type: 'agent-turn-complete',
+    'thread-id': `smoke-codex-${process.pid}`,
+    cwd: path.join(os.tmpdir(), 'codex-proj'),
+    'input-messages': ['修一下登录超时'],
+    'last-assistant-message': '已修复并补了测试',
+  }, ['codex-notify']);
+  ok('Codex notify(agent-turn-complete) → 静默上报', res.out.trim() === '', res);
+
   console.log('\n[3] OpenCode 子命令');
 
   plan = { permission: 'allow' };

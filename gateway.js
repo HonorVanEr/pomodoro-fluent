@@ -65,8 +65,11 @@ function clampTimeout(ms) {
 const SOURCE_LABELS = {
   'zcode': 'ZCode',
   'claude-code': 'Claude Code',
-  'opencode': 'OpenCode',
+  'vscode': 'VS Code',
   'cursor': 'Cursor',
+  'opencode': 'OpenCode',
+  'codex': 'Codex',
+  'qwen': 'Qwen Code',
   'manual': '手动',
 };
 function sourceLabel(s) {

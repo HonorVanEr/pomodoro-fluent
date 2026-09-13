@@ -64,7 +64,7 @@ npm start
 ### 后台运行
 应用关闭窗口后不会退出，而是隐藏在系统托盘（任务栏右侧的 🍅 图标），计时继续，到点照常弹窗提醒。**退出请在托盘右键菜单选择「退出」。**
 
-## 🤖 Agent 集成（ZCode / Claude Code / OpenCode）
+## 🤖 Agent 集成（ZCode / Claude Code / VS Code Copilot / Cursor / OpenCode / Codex / Qwen Code）
 
 应用运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址 + 随机 token 鉴权），让 AI 编程工具与番茄钟联动：
 
@@ -80,10 +80,10 @@ npm start
 **一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点「复制安装命令」→ 终端执行，hook 会自动写进配置（原文件自动备份）：
 
 ```bash
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / opencode
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / cursor / opencode / codex / qwen
 ```
 
-也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；OpenCode 走插件（复制插件文件 + 在 `opencode.json` 的 `plugin` 里登记）。
+也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，且会直接读 `.claude/settings.json`，配过 Claude 就免配）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 只有 `~/.codex/config.toml` 的 `notify`（回合结束通知，无弹窗审批）。
 
 任意脚本也能直接调用（token 见 `%APPDATA%\番茄钟\gateway.json`）：
 
