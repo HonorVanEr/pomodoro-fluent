@@ -61,7 +61,9 @@ const PomodoroApp = (() => {
     sAuto: $('sAuto'),
     sGateway: $('sGateway'),
     agentMeta: $('agentMeta'),
+    agentSelect: $('agentSelect'),
     btnCopyHook: $('btnCopyHook'),
+    btnCopyInstall: $('btnCopyInstall'),
     agentActivity: $('agentActivity'),
   };
 
@@ -361,17 +363,46 @@ const PomodoroApp = (() => {
     return ` · ${parts.join(' ')}`;
   }
 
-  // Claude Code settings.json 的 hooks 片段（复制给用户粘贴）
-  function buildHookSnippet(hookPath) {
-    const cmd = `node "${hookPath}"`;
+  // 各家 agent 的 hook 配置片段（复制给用户粘贴/手动编辑）
+  function buildHookSnippet(agent, hookPath, pluginPath) {
+    // 统一带 --source，弹窗徽标才不会认错宿主
+    const cmd = (src) => `node "${hookPath}" --source ${src}`;
+    if (agent === 'zcode') {
+      return JSON.stringify({
+        hooks: {
+          enabled: true,
+          timeoutMs: 600000,
+          events: {
+            PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 600000 }] }],
+            // AskUserQuestion：ZCode 会同时触发 PreToolUse 与 PermissionRequest，两个都接上
+            PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 600000 }] }],
+            Stop: [{ hooks: [{ type: 'command', command: cmd('zcode') }] }],
+            PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode') }] }],
+            PostToolUseFailure: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode') }] }],
+          },
+        },
+      }, null, 2);
+    }
+    if (agent === 'opencode') {
+      return JSON.stringify({
+        plugin: [`file://${(pluginPath || '').replace(/\\/g, '/')}`],
+      }, null, 2);
+    }
     return JSON.stringify({
       hooks: {
-        Notification: [{ hooks: [{ type: 'command', command: cmd }] }],
-        Stop: [{ hooks: [{ type: 'command', command: cmd }] }],
-        SubagentStop: [{ hooks: [{ type: 'command', command: cmd }] }],
-        PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+        Notification: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
+        PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 600 }] }],
+        PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 600 }] }],
+        Stop: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
+        SubagentStop: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
+        PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code') }] }],
       },
     }, null, 2);
+  }
+
+  // 一键安装命令：交给 hook CLI 自己写配置（会先备份原文件）
+  function buildInstallCommand(agent, hookPath) {
+    return `node "${hookPath}" install --agent ${agent}`;
   }
 
   // ---- 事件绑定 ----
@@ -560,11 +591,26 @@ const PomodoroApp = (() => {
     dom.sGateway.addEventListener('change', () => {
       window.pomodoro.setGatewayEnabled(dom.sGateway.checked);
     });
+    const flash = (btn, text) => {
+      const old = btn.dataset.label || btn.textContent;
+      btn.dataset.label = old;
+      btn.textContent = text;
+      setTimeout(() => { btn.textContent = btn.dataset.label; }, 1500);
+    };
+
+    const currentAgent = () => (dom.agentSelect ? dom.agentSelect.value : 'claude');
+
     dom.btnCopyHook.addEventListener('click', () => {
       if (!gatewayState.hookPath) return;
-      window.pomodoro.copyText(buildHookSnippet(gatewayState.hookPath));
-      dom.btnCopyHook.textContent = '已复制 ✓';
-      setTimeout(() => { dom.btnCopyHook.textContent = '复制 Hook 配置'; }, 1500);
+      const agent = currentAgent();
+      window.pomodoro.copyText(buildHookSnippet(agent, gatewayState.hookPath, gatewayState.pluginPath));
+      flash(dom.btnCopyHook, '已复制 ✓');
+    });
+
+    dom.btnCopyInstall.addEventListener('click', () => {
+      if (!gatewayState.hookPath) return;
+      window.pomodoro.copyText(buildInstallCommand(currentAgent(), gatewayState.hookPath));
+      flash(dom.btnCopyInstall, '已复制 ✓');
     });
     window.pomodoro.onAgentActivity((a) => {
       if (a) {

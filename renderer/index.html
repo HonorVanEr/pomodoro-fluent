@@ -171,7 +171,15 @@
       </div>
       <div class="setting-row agent-row">
         <span class="agent-meta" id="agentMeta">检测中…</span>
-        <button class="copy-btn" id="btnCopyHook" title="复制 Claude Code hook 配置片段">复制 Hook 配置</button>
+        <select id="agentSelect" class="agent-select" title="选择要生成配置的 agent">
+          <option value="zcode">ZCode</option>
+          <option value="claude">Claude Code</option>
+          <option value="opencode">OpenCode</option>
+        </select>
+      </div>
+      <div class="setting-row agent-row">
+        <button class="copy-btn" id="btnCopyHook" title="复制所选 agent 的 hook 配置片段">复制配置</button>
+        <button class="copy-btn" id="btnCopyInstall" title="复制一键安装命令（在本机终端执行）">复制安装命令</button>
       </div>
 
       <button class="drawer-save" id="drawerSave">保存设置</button>

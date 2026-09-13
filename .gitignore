@@ -16,3 +16,7 @@ material-test.js
 # 系统文件
 Thumbs.db
 .DS_Store
+
+# 本地工具目录（非项目源码）
+.workbuddy/
+.zcode/

@@ -3,6 +3,7 @@
 const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, Notification, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
+const crypto = require('crypto');
 const { execFile } = require('child_process');
 const { createGateway } = require('./gateway');
 
@@ -245,18 +246,48 @@ function createMainWindow() {
 }
 
 // ---------------------------------------------------------------------------
-// 创建通知弹窗（到时间弹出）
+// 创建通知 / 交互弹窗（到时间弹出、agent 提问、权限审批）
+//
+// 三种形态（payload.kind）：
+//   notification  纯通知，几秒后自动消失
+//   ask           提问：可在弹窗内选选项 / 填自定义回答
+//   permission    权限：允许 / 始终允许 / 拒绝
+//   custom        自定义按钮（旧 confirm 路径、休息建议）
+//
+// 完整 payload 存进 popupPayloads，由弹窗页按 id 通过 IPC 取回
+// （不再塞 URL query——提问的工具输入可能很长）。尺寸由弹窗页实测后
+// 通过 notify:resize 回传，主进程按右上角锚定重设，避免内容被裁切。
 // ---------------------------------------------------------------------------
+const INTERACTIVE_KINDS = new Set(['ask', 'permission', 'custom']);
+const popupPayloads = new Map(); // id -> payload
+const NOTIFY_MIN = { w: 320, h: 130 };
+const NOTIFY_MAX = { w: 560, h: 660 };
+
+function popupSizeFor(kind) {
+  if (kind === 'ask') return { width: 460, height: 260 };
+  if (kind === 'permission') return { width: 432, height: 240 };
+  return { width: 400, height: 176 };
+}
+
+function clampNum(n, lo, hi) {
+  const v = Number(n);
+  if (!Number.isFinite(v)) return lo;
+  return Math.max(lo, Math.min(hi, Math.round(v)));
+}
+
+function placeTopRight(win) {
+  const b = win.getBounds();
+  const { workArea } = screen.getDisplayMatching(b);
+  win.setPosition(workArea.x + workArea.width - b.width - 16, workArea.y + 16);
+}
+
 function showNotify(payload) {
   const data = payload || {};
-  const title = data.title || '时间到';
-  const message = data.message || '';
-  const type = data.type || 'work';
-  const sub = data.sub || '';
-  const mode = data.mode === 'confirm' ? 'confirm' : 'notify';
-  const confirmId = mode === 'confirm' ? (data.confirmId || '') : '';
-  const actions = mode === 'confirm' && Array.isArray(data.actions) ? data.actions : [];
-  const timeoutMs = Number(data.timeoutMs) > 0 ? Math.round(Number(data.timeoutMs)) : 0;
+  const id = data.id || crypto.randomUUID();
+  const kind = INTERACTIVE_KINDS.has(data.kind) ? data.kind : 'notification';
+  // ask / permission / custom 一律等待用户在弹窗内决策（网关侧同样只在
+  // 这三类上做长轮询），notification 才是看完即走
+  const interactive = INTERACTIVE_KINDS.has(kind);
 
   // 如果已经有通知窗口，先关掉旧的
   if (notifyWindow && !notifyWindow.isDestroyed()) {
@@ -264,10 +295,10 @@ function showNotify(payload) {
     notifyWindow = null;
   }
 
+  const size = popupSizeFor(kind);
   const nw = new BrowserWindow({
-    width: 400,
-    // 确认模式多一行按钮
-    height: mode === 'confirm' ? 226 : 170,
+    width: size.width,
+    height: size.height,
     frame: false,
     transparent: true,
     backgroundColor: '#00000000',
@@ -285,31 +316,58 @@ function showNotify(payload) {
   });
 
   notifyWindow = nw;
+  // 视觉风味：ask / permission 用自身 kind；其余沿用旧 type（work / break / agent…）
+  const flavor = data.flavor || (kind === 'ask' || kind === 'permission' ? kind : (data.type || 'agent'));
+  popupPayloads.set(id, { ...data, id, kind, interactive, flavor });
 
-  // 放在屏幕右上角
-  const { workArea } = screen.getPrimaryDisplay();
-  const b = nw.getBounds();
-  nw.setPosition(workArea.x + workArea.width - b.width - 16, workArea.y + 16);
+  placeTopRight(nw);
+  nw.loadFile(path.join(__dirname, 'renderer', 'notify.html'), { query: { id } });
 
-  // 通过 query 传数据（简单可靠）
-  nw.loadFile(path.join(__dirname, 'renderer', 'notify.html'), {
-    query: {
-      title, message, type, sub,
-      mode, confirmId,
-      actions: JSON.stringify(actions),
-      timeoutMs: String(timeoutMs),
-    },
-  });
+  // 演示/排障模式：把弹窗页的 console 与加载失败打到主进程日志
+  if (process.env.POMODORO_POPUP_DEMO) {
+    nw.webContents.on('console-message', (_e, level, message, line, sourceId) => {
+      console.log(`[popup:${level}] ${message} (${sourceId}:${line})`);
+    });
+    nw.webContents.on('did-fail-load', (_e, code, desc) => {
+      console.error('[popup] did-fail-load', code, desc);
+    });
+  }
+
+  // 等弹窗页实测高度后 resize 再显示；兜底：600ms 内没上报就直接显示
+  const showFallback = setTimeout(() => {
+    if (!nw.isDestroyed() && !nw.isVisible()) {
+      placeTopRight(nw);
+      nw.show();
+    }
+  }, 600);
 
   nw.once('ready-to-show', () => {
-    nw.show();
     setTimeout(() => applyAcrylicToWindow(nw, '28,30,40', 0.5, 14), 120);
   });
 
   nw.on('closed', () => {
+    clearTimeout(showFallback);
+    popupPayloads.delete(id);
     notifyWindow = null;
   });
 }
+
+// 弹窗页取回自己的完整 payload
+ipcMain.handle('notify:payload', (_e, id) => popupPayloads.get(id) || null);
+
+// 弹窗页实测内容高度后回传，主进程重设尺寸并靠右上角显示
+ipcMain.on('notify:resize', (e, size) => {
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (!win || win.isDestroyed()) return;
+  const s = size || {};
+  const { workArea } = screen.getDisplayMatching(win.getBounds());
+  const w = clampNum(s.width, NOTIFY_MIN.w, Math.min(NOTIFY_MAX.w, workArea.width - 24));
+  const h = clampNum(s.height, NOTIFY_MIN.h, Math.min(NOTIFY_MAX.h, workArea.height - 32));
+  win.setSize(w, h);
+  placeTopRight(win);
+  if (process.env.POMODORO_POPUP_DEMO) console.log(`[popup] resize → ${w}x${h}`);
+  if (!win.isVisible()) win.show();
+});
 
 // ---------------------------------------------------------------------------
 // 系统托盘
@@ -679,9 +737,13 @@ ipcMain.on('tray:update', (_e, state) => {
   }
 });
 
-ipcMain.on('notify:close', (e) => {
-  // 用户手动关闭确认弹窗：把挂起的确认按 dismissed 兜底返回（HTTP 调用方不再等待）
-  if (gateway) gateway.dismissPending('dismissed');
+ipcMain.on('notify:close', (e, id) => {
+  // 用户手动关闭弹窗：只把该弹窗对应的交互按 dismissed 兜底返回
+  // （action=null → 调用方回退终端原生询问，不替用户做决定）
+  if (gateway) {
+    if (id) gateway.resolveInteraction(id, { action: null, answers: {}, text: '' }, 'dismissed');
+    else gateway.dismissPending('dismissed');
+  }
   // 按请求来源窗口精确关闭：被顶掉的旧弹窗的自动关闭定时器晚触发时，
   // 不能误关当前正在展示的新弹窗
   const win = BrowserWindow.fromWebContents(e.sender);
@@ -714,15 +776,25 @@ function saveConfig(patch) {
 function hookScriptPath() {
   return path.join(app.getPath('userData'), 'hook', 'pomodoro-hook.js');
 }
+function opencodePluginPath() {
+  return path.join(app.getPath('userData'), 'hook', 'opencode', 'pomodoro-opencode.ts');
+}
+// 复制单个文件：内容一致就跳过（避免每次启动都写盘）
+function copyOnce(src, dst) {
+  const buf = fs.readFileSync(src);
+  fs.mkdirSync(path.dirname(dst), { recursive: true });
+  if (!fs.existsSync(dst) || !buf.equals(fs.readFileSync(dst))) {
+    fs.writeFileSync(dst, buf);
+  }
+  return dst;
+}
 function installHookScript() {
   try {
-    const src = path.join(__dirname, 'bin', 'pomodoro-hook.js');
-    const buf = fs.readFileSync(src);
-    const dst = hookScriptPath();
-    fs.mkdirSync(path.dirname(dst), { recursive: true });
-    if (!fs.existsSync(dst) || !buf.equals(fs.readFileSync(dst))) {
-      fs.writeFileSync(dst, buf);
-    }
+    const dst = copyOnce(path.join(__dirname, 'bin', 'pomodoro-hook.js'), hookScriptPath());
+    // OpenCode 插件一起带上：CLI 的 install --agent opencode 会用到
+    try {
+      copyOnce(path.join(__dirname, 'bin', 'opencode', 'pomodoro-opencode.ts'), opencodePluginPath());
+    } catch (e) { /* 插件缺失不影响主流程 */ }
     return dst;
   } catch (e) {
     console.error('[gateway] 安装 hook 脚本失败:', e.message);
@@ -736,6 +808,7 @@ function pushGatewayState() {
     enabled: !!(gateway && gateway.isRunning()),
     port: gateway ? gateway.getPort() : null,
     hookPath: hookScriptPath(),
+    pluginPath: opencodePluginPath(),
     activity: gateway ? gateway.getActivity() : null,
   });
 }
@@ -782,7 +855,20 @@ ipcMain.on('gateway:get-state', () => {
   pushGatewayState();
 });
 
-// 确认弹窗按钮点击 → 网关 resolve → 关闭该弹窗（按来源窗口定位）
+// 交互弹窗（ask / permission / custom）用户在弹窗内决策 →
+// 网关 resolve → 长轮询的 hook 请求拿到结果 → 关闭该弹窗（按来源窗口定位）
+ipcMain.on('interaction:respond', (e, payload) => {
+  const p = payload || {};
+  const resolved = gateway
+    ? gateway.resolveInteraction(p.id, { action: p.action, answers: p.answers || {}, text: p.text || '' }, 'user')
+    : false;
+  if (resolved) {
+    const win = BrowserWindow.fromWebContents(e.sender);
+    if (win && !win.isDestroyed()) win.close();
+  }
+});
+
+// 旧接口兼容：只有 action 的确认
 ipcMain.on('confirm:respond', (e, payload) => {
   const p = payload || {};
   const resolved = gateway ? gateway.resolveConfirm(p.id, p.action, 'user') : false;
@@ -815,6 +901,24 @@ app.whenReady().then(() => {
     if (BrowserWindow.getAllWindows().length === 0) createMainWindow();
     else if (mainWindow) mainWindow.show();
   });
+
+  // 弹窗演示：POMODORO_POPUP_DEMO=1 依次弹一遍 ask / permission / notification
+  if (process.env.POMODORO_POPUP_DEMO) {
+    const demo = [
+      { kind: 'ask', source: 'zcode', title: '用哪种方案实现？', message: 'ZCode 想确认重构方向',
+        questions: [
+          { id: 'q0', question: '选一种缓存策略：', header: '缓存', multiSelect: false, custom: true,
+            options: [{ id: 'o0', label: 'LRU', description: '最近最少使用，内存可控' }, { id: 'o1', label: 'TTL', description: '按时间过期，实现简单' }] },
+          { id: 'q1', question: '需要覆盖哪些端？（可多选）', header: '范围', multiSelect: true, custom: false,
+            options: [{ id: 'o0', label: 'Web' }, { id: 'o1', label: '桌面端' }, { id: 'o2', label: '移动端' }] },
+        ], timeoutMs: 60000 },
+      { kind: 'permission', source: 'claude-code', title: '允许 Bash？', message: 'agent 请求执行该工具',
+        detail: 'command: npm run build -- --watch\ndescription: 构建并监听变更',
+        permission: { tool: 'Bash', rule: 'npm run build', canAlways: true }, timeoutMs: 60000 },
+      { kind: 'notification', source: 'opencode', title: '任务跑完了', message: '12 个文件已更新，测试全绿', sub: '' },
+    ];
+    demo.forEach((d, i) => setTimeout(() => showNotify(d), 400 + i * 3500));
+  }
 
   if (process.env.POMODORO_SMOKE === '1') {
     // 冒烟测试模式：加载完成后自动退出

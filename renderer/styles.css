@@ -593,6 +593,23 @@ input[type="number"]::-webkit-inner-spin-button {
 .copy-btn:hover { background: rgba(255, 255, 255, 0.14); }
 .copy-btn:active { transform: scale(0.97); }
 
+.agent-select {
+  flex: 0 0 auto;
+  padding: 6px 8px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  outline: none;
+}
+.agent-select option {
+  background: #24262f;
+  color: var(--text);
+}
+
 /* ---------- 本专注期 agent 活动条 ---------- */
 .agent-activity {
   margin-top: 10px;

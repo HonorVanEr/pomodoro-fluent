@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="notify.css" />
 </head>
 <body>
-  <div id="notify-card" class="notify-card" data-type="work">
+  <div id="notify-card" class="notify-card" data-flavor="agent" data-kind="notification">
     <div class="glass-blob blob-a"></div>
     <div class="glass-blob blob-b"></div>
 
@@ -20,8 +20,13 @@
       </div>
 
       <div class="notify-content">
+        <div class="notify-head">
+          <span class="notify-kind" id="notifyKind">通知</span>
+          <span class="notify-source" id="notifySource" hidden></span>
+        </div>
         <div class="notify-title" id="notifyTitle">时间到</div>
         <div class="notify-message" id="notifyMessage"></div>
+        <pre class="notify-detail" id="notifyDetail" hidden></pre>
         <div class="notify-sub" id="notifySub"></div>
       </div>
 
@@ -31,6 +36,9 @@
         </svg>
       </button>
     </div>
+
+    <!-- ask：问题列表；permission：备注输入 -->
+    <div class="notify-form" id="notifyForm" hidden></div>
 
     <div class="notify-actions" id="notifyActions" hidden></div>
 
