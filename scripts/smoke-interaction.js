@@ -474,6 +474,112 @@ async function run() {
   r = await post('/api/event', { kind: 'subagent-start', source: 'vscode' });
   ok('网关接受 subagent-start 事件', r && r.ok === true, r);
 
+  console.log('\n[2.8] Trae');
+
+  // Trae 的 hook 是 Claude Code 那种嵌套格式，输入 snake_case；
+  // 但只有 6 个事件（有 Notification、无 PermissionRequest）→ 审批挂 PreToolUse。
+  // 终端工具叫 RunCommand（不是 Bash / run_in_terminal）。
+  plan = { permission: 'allow' };
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-trae-${process.pid}`,
+    cwd: path.join(os.tmpdir(), 'trae-proj'),
+    workspace_roots: [path.join(os.tmpdir(), 'trae-proj')],
+    tool_use_id: `trae-run-${process.pid}`,
+    tool_name: 'RunCommand',
+    llm_tool_name: 'RunCommand',
+    tool_input: { command: 'npm run build' },
+  }, ['--source', 'trae']);
+  out = parseOut(res.out);
+  ok('Trae PreToolUse（RunCommand）允许 → permissionDecision=allow',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+  ok('Trae 上下文 → 来源标为 trae 且项目名取自 workspace_roots',
+    lastPopup && lastPopup.context && lastPopup.context.agent === 'trae'
+      && lastPopup.context.project === 'trae-proj', lastPopup && lastPopup.context);
+
+  // 非高风险工具（Read）不弹窗、不回决策
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-trae-${process.pid}`,
+    tool_name: 'Read',
+    tool_input: { file_path: 'src/index.ts' },
+  }, ['--source', 'trae']);
+  out = parseOut(res.out);
+  ok('Trae 非高风险工具（Read）→ 不弹窗、不回决策',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // 提问：Trae 的工具名与 Claude Code 同名（AskUserQuestion）→ 默认走 updatedInput.answers
+  plan = { ask: 'submit', askOption: 0 };
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-trae-${process.pid}`,
+    tool_use_id: `trae-ask-${process.pid}`,
+    tool_name: 'AskUserQuestion',
+    tool_input: {
+      questions: [{
+        question: '用哪种缓存策略？', header: '缓存',
+        options: [{ label: 'LRU', description: '内存可控' }, { label: 'TTL', description: '实现简单' }],
+      }],
+    },
+  }, ['--source', 'trae']);
+  out = parseOut(res.out);
+  ok('Trae 提问 → updatedInput.answers 注入（与 Claude Code 同名同通道）',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'allow'
+      && out.hookSpecificOutput.updatedInput
+      && /LRU/.test(JSON.stringify(out.hookSpecificOutput.updatedInput.answers || {})), res);
+
+  // Notification 是 Trae 的异步通知（含 permission_prompt / idle_prompt）→ 只上报
+  res = await runHook({
+    hook_event_name: 'Notification',
+    session_id: `smoke-trae-${process.pid}`,
+    notification_type: 'idle_prompt',
+    message: '智能体已完成任务',
+  }, ['--source', 'trae']);
+  ok('Trae Notification → 静默上报（stdout 为空）', res.out.trim() === '', res);
+
+  // Stop 只上报：Trae 的 Stop 支持 decision:block 阻止收尾，但我们绝不用
+  res = await runHook({
+    hook_event_name: 'Stop',
+    session_id: `smoke-trae-${process.pid}`,
+    stop_hook_active: false,
+    loop_count: 0,
+    last_assistant_message: '已完成重构',
+  }, ['--source', 'trae']);
+  ok('Trae Stop → 静默上报，不返回 decision:block', res.out.trim() === '', res);
+
+  // 未决策兜底：不回决策就会落回 Trae 自己的审批设置 → 显式 ask
+  holdInteraction = true;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-trae-${process.pid}`,
+    tool_use_id: `trae-hold-${process.pid}`,
+    tool_name: 'RunCommand',
+    tool_input: { command: `echo trae-no-answer-${process.pid}` },
+  }, ['--source', 'trae'], { POMODORO_TIMEOUT_S: '5' });
+  holdInteraction = false;
+  out = parseOut(res.out);
+  ok('Trae 未决策 → permissionDecision=ask，绝不静默放行',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'ask', res);
+
+  // 来源自动识别：不带 --source，靠 payload 里的 llm_tool_name / workspace_roots 认出来
+  plan = { permission: 'allow' };
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-trae-auto-${process.pid}`,
+    workspace_roots: [path.join(os.tmpdir(), 'trae-auto')],
+    tool_use_id: `trae-auto-${process.pid}`,
+    tool_name: 'RunCommand',
+    llm_tool_name: 'RunCommand',
+    tool_input: { command: 'npm test' },
+  });
+  out = parseOut(res.out);
+  ok('Trae 来源自动识别（llm_tool_name/workspace_roots）',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'allow'
+      && lastPopup && lastPopup.context && lastPopup.context.agent === 'trae', res);
+
   // Cursor：beforeShellExecution 拦截命令
   plan = { permission: 'deny', text: '这条命令先不动' };
   res = await runHook({

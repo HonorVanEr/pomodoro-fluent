@@ -66,6 +66,7 @@ const SOURCE_LABELS = {
   'zcode': 'ZCode',
   'claude-code': 'Claude Code',
   'vscode': 'VS Code',
+  'trae': 'Trae',
   'cursor': 'Cursor',
   'opencode': 'OpenCode',
   'codex': 'Codex',

@@ -407,6 +407,25 @@ const PomodoroApp = (() => {
         },
       }, null, 2);
     }
+    if (agent === 'trae') {
+      // Trae：全局 %userprofile%/.trae-cn/hooks.json，Claude Code 那种嵌套格式。
+      // 6 个事件（有 Notification，无 PermissionRequest）→ 审批挂 PreToolUse。
+      // 与 VS Code 不同：Trae 的 matcher 真的生效，所以先用它把普通工具挡在外面。
+      return JSON.stringify({
+        version: 1,
+        hooks: {
+          PreToolUse: [{
+            matcher: 'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile',
+            hooks: [{ type: 'command', command: cmd('trae'), timeout: 600 }],
+          }],
+          Notification: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          Stop: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          SessionStart: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+        },
+      }, null, 2);
+    }
     if (agent === 'cursor') {
       // Cursor：~/.cursor/hooks.json（用户级）或 .cursor/hooks.json（项目级）
       return JSON.stringify({

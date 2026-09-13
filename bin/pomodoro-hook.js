@@ -29,17 +29,18 @@
 // 环境变量：
 //   POMODORO_GATEWAY_FILE      指定 gateway.json 路径
 //   POMODORO_PORT/TOKEN        直接指定网关端口与 token
-//   POMODORO_SOURCE            来源标记：zcode | claude-code | opencode | vscode | cursor | codex | qwen
+//   POMODORO_SOURCE            来源标记：zcode | claude-code | opencode | vscode | trae | cursor | codex | qwen
 //   POMODORO_ASK               1/0，AskUserQuestion 是否接管（默认 1）
 //   POMODORO_PERMISSION        1/0，PermissionRequest 是否接管（默认 1）
 //   POMODORO_CONFIRM_PRETOOL   1 开启普通 PreToolUse 双向确认（默认 0）
-//   POMODORO_VSCODE_APPROVE_TOOLS  VS Code 下走 PreToolUse 审批的工具正则，
-//                              匹配前会先把工具名归一化（去命名空间/下划线/大小写），
-//                              所以 run_in_terminal 与 runInTerminal 等价。
-//                              （默认只拦终端执行与删除/移动类破坏性工具；
-//                                `.*` = 每个工具都问；空串 = 关闭审批）
+//   POMODORO_PRETOOL_APPROVE_TOOLS  没有 PermissionRequest 的宿主（VS Code / Trae）
+//                              下走 PreToolUse 审批的工具正则，匹配前会先把工具名
+//                              归一化（去命名空间/下划线/大小写），所以 run_in_terminal、
+//                              runInTerminal、RunCommand 等价。（默认只拦终端执行与
+//                              删除/移动类破坏性工具；`.*` = 每个工具都问；空串 = 关闭）
+//   POMODORO_VSCODE_APPROVE_TOOLS   同上，兼容旧名
 //   POMODORO_LOCAL_ALWAYS_ALLOW 0 关闭本地「始终允许」规则缓存
-//                              （VS Code / Cursor 不支持规则回写，靠它落地，默认 1）
+//                              （VS Code / Trae / Cursor 不支持规则回写，靠它落地，默认 1）
 //   POMODORO_ALWAYS_ALLOW      0 隐藏「始终允许」按钮（默认 1）
 //   POMODORO_PERMISSION_DEST   始终允许写哪里（默认 projectSettings）
 //   POMODORO_TIMEOUT_S         弹窗等待秒数（默认 240，上限 590）
@@ -178,7 +179,9 @@ function cacheWrite(key, result) {
 // 关掉：POMODORO_LOCAL_ALWAYS_ALLOW=0
 // ---------------------------------------------------------------------------
 const LOCAL_RULE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
-const LOCAL_RULE_SOURCES = new Set(['vscode', 'cursor']);
+// Trae 的 PreToolUse 支持 permissionDecision / updatedInput / additionalContext，
+// 但同样**没有** updatedPermissions —— 也靠本地规则落地
+const LOCAL_RULE_SOURCES = new Set(['vscode', 'trae', 'cursor']);
 
 function localRuleFile() {
   return path.join(cacheDir(), 'always-allow.json');
@@ -306,7 +309,8 @@ function rememberContext(payload, event, source) {
   if (!sessionId) return null;
   const patch = {};
   if (source) patch.source = source;
-  const cwd = payload.cwd || payload.working_directory;
+  const cwd = payload.cwd || payload.working_directory
+    || (Array.isArray(payload.workspace_roots) ? payload.workspace_roots[0] : '');
   if (cwd) patch.cwd = cwd;
   if (payload.agent_type || payload.agentType) patch.agentType = payload.agent_type || payload.agentType;
   switch (event) {
@@ -498,8 +502,13 @@ function detectSource(payload) {
   if (payload && payload.source) return String(payload.source);
   if (env.ZCODE_PLUGIN_ROOT || env.ZCODE_CLI_HOME) return 'zcode';
   if (payload && (payload.cursor_version || payload.conversation_id)) return 'cursor';
+  // Trae 的 hook payload 会额外带 llm_tool_name 与 workspace_roots，可据此识别
+  if (payload && (payload.llm_tool_name || (payload.workspace_roots && payload.tool_use_id))) return 'trae';
   try {
     if (fs.existsSync(path.join(os.homedir(), '.zcode'))) return 'zcode';
+  } catch (e) { /* ignore */ }
+  try {
+    if (fs.existsSync(path.join(os.homedir(), '.trae-cn'))) return 'trae';
   } catch (e) { /* ignore */ }
   return 'claude-code';
 }
@@ -517,14 +526,15 @@ function detectProtocol(payload) {
 // VS Code Copilot 没有独立的 PermissionRequest 事件，审批只能挂在 PreToolUse 上。
 // 但 PreToolUse 对**每个**工具调用都会触发，全拦会变成弹窗轰炸 →
 // 默认只拦高风险工具（可用 POMODORO_VSCODE_APPROVE_TOOLS 改，设为空串即关闭）。
-// VS Code Copilot 没有独立权限事件（只有 8 个 hook 事件，无 PermissionRequest /
-// Notification），审批只能挂在 PreToolUse 上。而 VS Code **会忽略 matcher**，
-// 所有 hook 在每次工具调用时都会跑 → 全拦会变成弹窗轰炸。
-// 所以：默认只拦高风险工具，且判断放在脚本里做（matcher 不可靠）。
+// VS Code Copilot 与 Trae 都没有独立权限事件（Trae 只有 6 个事件），审批只能挂在
+// PreToolUse 上。而 PreToolUse 对**每个**工具调用都会触发，全拦会变成弹窗轰炸 →
+// 默认只拦高风险工具，且判断放在脚本里做（VS Code 会忽略 matcher，Trae 的
+// matcher 只在 PreToolUse/PostToolUse/Notification 上有效，不能只靠它）。
 //
-// 工具名归一化后再比对：VS Code 官方用 run_in_terminal / create_file /
-// replace_string_in_file 这类下划线命名，Claude harness 里又变成 Bash / Write，
-// 归一化后（runinterminal / createfile / replacestringinfile / bash / write）一网打尽。
+// 工具名归一化后再比对：VS Code 用 run_in_terminal / create_file，Trae 用
+// RunCommand，Claude harness 里又是 Bash —— 归一化后一网打尽。
+const PRETOOL_APPROVAL_SOURCES = new Set(['vscode', 'trae']);
+
 const VSCODE_APPROVE_DEFAULT = [
   // 执行命令 / 终端
   'runinterminal', 'runterminalcommand', 'runcommand', 'runcommands',
@@ -538,12 +548,14 @@ const VSCODE_APPROVE_DEFAULT = [
 
 function shouldApprovePreTool(payload, source) {
   if (flag('POMODORO_CONFIRM_PRETOOL', false) === true) return true;   // 手动全量开启
-  if (source !== 'vscode') return false;
+  if (!PRETOOL_APPROVAL_SOURCES.has(String(source || ''))) return false;
   const raw = String(payload.tool_name || payload.tool || '');
   const name = normalizeToolName(raw);
-  const pat = env.POMODORO_VSCODE_APPROVE_TOOLS === undefined
-    ? VSCODE_APPROVE_DEFAULT
-    : String(env.POMODORO_VSCODE_APPROVE_TOOLS);
+  const pat = env.POMODORO_PRETOOL_APPROVE_TOOLS !== undefined
+    ? String(env.POMODORO_PRETOOL_APPROVE_TOOLS)
+    : (env.POMODORO_VSCODE_APPROVE_TOOLS !== undefined
+      ? String(env.POMODORO_VSCODE_APPROVE_TOOLS)
+      : VSCODE_APPROVE_DEFAULT);
   if (!pat) return false;
   try {
     return new RegExp(pat, 'i').test(name) || new RegExp(pat, 'i').test(raw);
@@ -668,7 +680,7 @@ async function handlePermission(payload, source, gw, context) {
     timeoutMs: ms,
   }, ms);
 
-  if (!result) return vscodeAskFallback(source, '番茄钟没有收到决策（应用未运行或弹窗被关掉）');
+  if (!result) return preToolFallback(source, '番茄钟没有收到决策（应用未运行或弹窗被关掉）');
   const decided = result.decidedBy === 'user';
 
   if (decided && result.action === 'allow') {
@@ -705,14 +717,14 @@ async function handlePermission(payload, source, gw, context) {
   }
 
   // 未决策：不输出，走宿主原生询问
-  return vscodeAskFallback(source, '番茄钟未收到决策，请手动确认');
+  return preToolFallback(source, '番茄钟未收到决策，请手动确认');
 }
 
-// VS Code 没有 PermissionRequest，PreToolUse 若「不做决策」，就会按 VS Code 自己的
-// 审批设置走 —— 用户可能已经把终端命令设成免确认，等于被静默放行。
+// VS Code / Trae 都没有 PermissionRequest，PreToolUse 若「不做决策」，就会按宿主
+// 自己的审批设置走 —— 用户可能已经把终端命令设成免确认，等于被静默放行。
 // 所以这里显式回一个 ask，强制弹出原生确认：宁可多问一次，也不替他放行。
-function vscodeAskFallback(source, reason) {
-  if (String(source) !== 'vscode') return null;
+function preToolFallback(source, reason) {
+  if (!PRETOOL_APPROVAL_SOURCES.has(String(source || ''))) return null;
   return {
     hookSpecificOutput: {
       hookEventName: 'PreToolUse',
@@ -1326,6 +1338,43 @@ function installVscode(print) {
   }
 }
 
+// Trae（字节）：6 个事件 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse /
+// Stop / Notification —— **有 Notification，但没有 PermissionRequest**，
+// 所以审批同样挂 PreToolUse（返回 permissionDecision 的 allow/deny/ask 都被支持）。
+// 配置是 Claude Code 那种嵌套结构（event → [{matcher, hooks:[{type,command,timeout}]}]），
+// 全局放 %userprofile%/.trae-cn/hooks.json，项目级放 $PROJECT/.trae/hooks.json。
+// 与 VS Code 不同的是：**Trae 的 matcher 真的生效**（限 PreToolUse/PostToolUse/Notification），
+// 所以这里用 matcher 先把普通工具挡在外面，脚本里的高风险判断作为兜底。
+const TRAE_PRETOOL_MATCHER =
+  'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile';
+
+function installTrae(print) {
+  const file = path.join(os.homedir(), '.trae-cn', 'hooks.json');
+  const cfg = readJson(file);
+  cfg.version = 1;
+  cfg.hooks = cfg.hooks || {};
+  const h = hookCommandShell('trae');
+  const withTimeout = (e) => ({ ...e, timeout: 600 });
+  const fastTimeout = (e) => ({ ...e, timeout: 30 });
+  // PreToolUse 要等用户点弹窗 → 超时必须放大（Trae 默认 30 秒，会直接掐掉）
+  pushHook(cfg.hooks, 'PreToolUse', { matcher: TRAE_PRETOOL_MATCHER, hooks: [withTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'Notification', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'Stop', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'SessionStart', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'UserPromptSubmit', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'PostToolUse', { matcher: '*', hooks: [fastTimeout({ ...h })] });
+  writeJson(file, cfg, print);
+  if (!print) {
+    process.stdout.write(
+      'Trae 两条注意事项：\n' +
+      '  1) 创建 Hook 时选「本地自动运行」而非「沙箱运行」—— 沙箱会限制系统权限，\n' +
+      '     hook 可能连不上本机 127.0.0.1:5277 的番茄钟网关（连不上就静默跳过，不弹窗）。\n' +
+      '  2) Trae 会同时读 Claude Code 的 Hook 配置并合并执行；若 ~/.claude/settings.json\n' +
+      '     里也有番茄钟的 hook，同一次调用会跑两遍。二选一，或用 --clean 收敛。\n'
+    );
+  }
+}
+
 // Cursor（~/.cursor/hooks.json，用户级；项目级可放 .cursor/hooks.json）
 function installCursor(print) {
   const file = path.join(os.homedir(), '.cursor', 'hooks.json');
@@ -1427,12 +1476,13 @@ function runInstall(args) {
   CLEAN_STALE = args.includes('--clean');
   const idx = args.indexOf('--agent');
   const agent = (idx >= 0 && args[idx + 1]) || 'all';
-  const all = ['zcode', 'claude', 'vscode', 'cursor', 'opencode', 'codex', 'qwen'];
+  const all = ['zcode', 'claude', 'vscode', 'trae', 'cursor', 'opencode', 'codex', 'qwen'];
   const targets = agent === 'all' ? all : [agent];
   targets.forEach((t) => {
     if (t === 'claude') installClaude(print);
     else if (t === 'zcode') installZcode(print);
     else if (t === 'vscode') installVscode(print);
+    else if (t === 'trae') installTrae(print);
     else if (t === 'cursor') installCursor(print);
     else if (t === 'opencode') installOpencode(print);
     else if (t === 'codex') installCodex(print);
@@ -1461,7 +1511,7 @@ function usage() {
     '  pomodoro-hook.js sessions               # 查看 hook 跟踪到的会话（任务/最近工具/项目）',
     '  pomodoro-hook.js install --agent <宿主> [--print] [--clean]',
     '',
-    '  宿主：zcode / claude / vscode / cursor / opencode / codex / qwen / all',
+    '  宿主：zcode / claude / vscode / trae / cursor / opencode / codex / qwen / all',
     '  --print  只打印将要写入的配置，不动文件',
     '  --clean  同时清掉指向番茄钟 hook 其它副本的旧条目',
   ].join('\n') + '\n');

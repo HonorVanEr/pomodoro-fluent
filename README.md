@@ -64,7 +64,7 @@ npm start
 ### 后台运行
 应用关闭窗口后不会退出，而是隐藏在系统托盘（任务栏右侧的 🍅 图标），计时继续，到点照常弹窗提醒。**退出请在托盘右键菜单选择「退出」。**
 
-## 🤖 Agent 集成（ZCode / Claude Code / VS Code Copilot / Cursor / OpenCode / Codex / Qwen Code）
+## 🤖 Agent 集成（ZCode / Claude Code / VS Code Copilot / Trae / Cursor / OpenCode / Codex / Qwen Code）
 
 应用运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址 + 随机 token 鉴权），让 AI 编程工具与番茄钟联动：
 
@@ -80,14 +80,14 @@ npm start
 **一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点「复制安装命令」→ 终端执行，hook 会自动写进配置（原文件自动备份）：
 
 ```bash
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / cursor / opencode / codex / qwen
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
 ```
 
-也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，所以审批挂 `PreToolUse`；且 VS Code **会忽略 matcher**，只拦高风险工具的判断在脚本里做）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 只有 `~/.codex/config.toml` 的 `notify`（回合结束通知，无弹窗审批）。
+也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，所以审批挂 `PreToolUse`；且 VS Code **会忽略 matcher**，只拦高风险工具的判断在脚本里做）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，审批同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，所以先用它收窄）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 只有 `~/.codex/config.toml` 的 `notify`（回合结束通知，无弹窗审批）。
 
-> VS Code 有个需要留意的点：它默认也会读 `~/.claude/settings.json`，配过 Claude Code 的机器会被跑两遍
-> （且 Claude 那份的 matcher 会被忽略 → 每个工具都触发）。建议在 VS Code 设置里加
-> `"chat.hookFilesLocations": { "~/.claude/settings.json": false }`，或干脆只在 VS Code 里用。
+> 两个需要留意的点：
+> - **VS Code** 默认也会读 `~/.claude/settings.json`，配过 Claude Code 的机器会被跑两遍（且 Claude 那份的 matcher 会被忽略 → 每个工具都触发）。建议在 VS Code 设置里加 `"chat.hookFilesLocations": { "~/.claude/settings.json": false }`。
+> - **Trae** 同样会合并 Claude Code 的 hook 配置（官方明说会"合并执行"），而且创建 Hook 时必须选**「本地自动运行」**——沙箱模式限制了系统权限，hook 可能连不上本机网关，表现就是"配了但没弹窗"，连不上时它是静默跳过的。
 
 任意脚本也能直接调用（token 见 `%APPDATA%\番茄钟\gateway.json`）：
 
