@@ -906,6 +906,7 @@ app.whenReady().then(() => {
   if (process.env.POMODORO_POPUP_DEMO) {
     const demo = [
       { kind: 'ask', source: 'zcode', title: '用哪种方案实现？', message: 'ZCode 想确认重构方向',
+        context: { agent: 'zcode', session: 'a1b2c3', project: 'pomodoro-fluent', task: '把 agent 网关的弹窗改成可交互的', tool: 'AskUserQuestion' },
         questions: [
           { id: 'q0', question: '选一种缓存策略：', header: '缓存', multiSelect: false, custom: true,
             options: [{ id: 'o0', label: 'LRU', description: '最近最少使用，内存可控' }, { id: 'o1', label: 'TTL', description: '按时间过期，实现简单' }] },
@@ -914,8 +915,10 @@ app.whenReady().then(() => {
         ], timeoutMs: 60000 },
       { kind: 'permission', source: 'claude-code', title: '允许 Bash？', message: 'agent 请求执行该工具',
         detail: 'command: npm run build -- --watch\ndescription: 构建并监听变更',
+        context: { agent: 'claude-code', agentType: 'implementation-agent', session: 'd4e5f6', project: 'pomodoro-fluent', task: '修复登录超时后重试逻辑', tool: 'Bash', toolDetail: 'npm run build -- --watch' },
         permission: { tool: 'Bash', rule: 'npm run build', canAlways: true }, timeoutMs: 60000 },
-      { kind: 'notification', source: 'opencode', title: '任务跑完了', message: '12 个文件已更新，测试全绿', sub: '' },
+      { kind: 'notification', source: 'opencode', title: '任务跑完了', message: '12 个文件已更新，测试全绿', sub: '',
+        context: { agent: 'opencode', session: '778899', project: 'pomodoro-fluent', task: '重构缓存层并补齐单测', tool: 'task' } },
     ];
     demo.forEach((d, i) => setTimeout(() => showNotify(d), 400 + i * 3500));
   }

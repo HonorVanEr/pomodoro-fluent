@@ -129,6 +129,7 @@ function runHook(stdinPayload, extraArgs = [], env = {}) {
     child.stderr.on('data', (c) => { err += c; });
     child.on('error', reject);
     child.on('close', () => resolve({ out, err }));
+    child.stdin.on('error', () => {}); // 子进程先退出时不至于把父进程带崩
     child.stdin.end(JSON.stringify(stdinPayload));
   });
 }
@@ -289,6 +290,50 @@ async function run() {
     message: 'Claude 需要你的确认',
   }, ['--source', 'claude-code']);
   ok('Notification → 静默上报（stdout 为空）', res.out.trim() === '', res);
+
+  console.log('\n[2.5] 上下文跟踪（哪个任务 / 哪个 agent / 在动哪个工具）');
+
+  // 网关侧：context 原样透传到弹窗
+  plan = { ask: 'cancel' };
+  await post('/api/interaction', {
+    kind: 'ask', source: 'manual', title: '上下文透传测试',
+    questions: [{ id: 'q0', question: '继续？', options: [{ id: 'o0', label: '继续' }] }],
+    context: { agent: 'zcode', project: 'pomodoro-fluent', task: '重构网关', tool: 'Bash', session: 'abc123' },
+  });
+  ok('HTTP context → 弹窗 payload 完整保留',
+    lastPopup && lastPopup.context && lastPopup.context.project === 'pomodoro-fluent' &&
+    lastPopup.context.task === '重构网关' && lastPopup.context.tool === 'Bash' && lastPopup.context.session === 'abc123',
+    lastPopup && lastPopup.context);
+
+  // CLI 侧：先记任务（UserPromptSubmit），再触发权限弹窗，弹窗应带上任务/项目/工具
+  const sess = `smoke-ctx-${process.pid}`;
+  plan = { permission: 'allow' };
+  await runHook({
+    hook_event_name: 'UserPromptSubmit',
+    session_id: sess,
+    prompt: '把番茄钟的 agent 弹窗改成可交互的',
+    cwd: path.join(os.tmpdir(), 'demo-project'),
+  }, ['--source', 'zcode']);
+  await runHook({
+    hook_event_name: 'PermissionRequest',
+    session_id: sess,
+    tool_name: 'Bash',
+    tool_input: { command: 'npm test' },
+    tool_use_id: `ctx-${process.pid}`,
+  }, ['--source', 'zcode']);
+  const c = (lastPopup && lastPopup.context) || {};
+  ok('CLI 跟踪任务提示词 → 弹窗显示任务',
+    c.task === '把番茄钟的 agent 弹窗改成可交互的', c);
+  ok('CLI 跟踪项目目录 → 显示项目名', c.project === 'demo-project', c);
+  ok('CLI 跟踪工具与命令 → 显示工具与详情',
+    c.tool === 'Bash' && c.toolDetail === 'npm test', c);
+  ok('CLI 记录会话尾号', typeof c.session === 'string' && c.session.length === 6, c);
+  ok('CLI 记录宿主 agent 名称', c.agent === 'zcode', c);
+
+  res = await runHook({}, ['sessions']);
+  ok('sessions 子命令列出跟踪到的会话',
+    res.out.includes(sess.slice(-6)) && res.out.includes('npm test') && res.out.includes('demo-project'),
+    res.out.slice(0, 240));
 
   console.log('\n[3] OpenCode 子命令');
 

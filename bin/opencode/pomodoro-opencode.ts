@@ -126,11 +126,46 @@ async function rejectQuestion(ctx, sessionID, requestID) {
   }
 }
 
+// ---- 会话上下文：让弹窗能显示「哪个任务」 ----
+function shortSession(id) {
+  return id ? String(id).slice(-6) : ""
+}
+
+// 尽力取会话标题（拿不到就算了，弹窗会退化成只显示会话尾号与项目名）
+async function sessionInfo(ctx, sessionID) {
+  const info = { sessionID, sessionTitle: "", directory: process.cwd() }
+  if (!sessionID) return info
+  try {
+    if (ctx?.client?.session?.get) {
+      const res = await ctx.client.session.get({ path: { id: sessionID } })
+      const data = res?.data || res
+      if (data?.title) info.sessionTitle = String(data.title)
+      if (data?.directory) info.directory = String(data.directory)
+      return info
+    }
+  } catch {}
+  try {
+    const base = serverUrl().replace(/\/+$/, "")
+    const res = await fetch(`${base}/session/${encodeURIComponent(sessionID)}`)
+    if (res.ok) {
+      const data = await res.json()
+      if (data?.title) info.sessionTitle = String(data.title)
+      if (data?.directory) info.directory = String(data.directory)
+    }
+  } catch {}
+  return info
+}
+
 export const PomodoroPlugin = async (ctx) => {
   return {
     // 权限请求：番茄钟弹窗里点允许/拒绝，结果回写成 OpenCode 的 status
     "permission.ask": async (input, output) => {
-      const res = await callHook("opencode-permission", { permission: input })
+      const info = await sessionInfo(ctx, input?.sessionID)
+      const res = await callHook("opencode-permission", {
+        permission: input,
+        agent: input?.agent || input?.metadata?.agent || "",
+        ...info,
+      })
       if (!res || !res.status) return // 番茄钟没运行 / 未决策 → 交给 OpenCode 原生询问
       if (res.status === "allow") output.status = "allow"
       else if (res.status === "deny") output.status = "deny"
@@ -142,18 +177,22 @@ export const PomodoroPlugin = async (ctx) => {
 
       if (type === "question.asked") {
         const questions = props.questions || []
+        const sessionID = props.sessionID
+        const info = await sessionInfo(ctx, sessionID)
         const res = await callHook("opencode-question", {
           questions,
-          sessionID: props.sessionID,
+          agent: props.agent || "",
+          ...info,
+          sessionID,
           requestID: props.requestID || props.id,
           serverUrl: serverUrl(),
         })
         if (!res) return
         if (res.reject || !Array.isArray(res.answers)) {
-          await rejectQuestion(ctx, props.sessionID, props.requestID || props.id)
+          await rejectQuestion(ctx, sessionID, props.requestID || props.id)
           return
         }
-        await replyQuestion(ctx, props.sessionID, props.requestID || props.id, res.answers)
+        await replyQuestion(ctx, sessionID, props.requestID || props.id, res.answers)
         return
       }
 

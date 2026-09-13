@@ -24,6 +24,39 @@ curl / 任意脚本 ───┘                        用户决策    └─ �
 - 你手动关掉弹窗、或弹窗被新弹窗顶掉 → 返回空决策，agent 回退到**终端原生询问**，不会静默通过；
 - 番茄钟没启动 → hook 静默退出，绝不阻断 agent。
 
+## 弹窗上的上下文：哪个 agent、哪个任务、在动哪个工具
+
+每个 hook 都是独立进程，所以 hook CLI 会把当前会话的上下文**按会话累积**在 `%TEMP%/pomodoro-hook-cache/session-*.json`（TTL 12 小时），随每次弹窗一起下发：
+
+| 弹窗上显示 | 来源 | 示例 |
+|---|---|---|
+| 来源徽标 | `--source` / 自动识别 | `ZCode` / `Claude Code` / `OpenCode` |
+| 子 agent 徽标 | `agent_type`（Claude Code）/ `agent`（OpenCode）/ `SessionStart` 的 agent 信息 | `implementation-agent` |
+| 任务行（最多两行） | `UserPromptSubmit` 的 `prompt` | 把 agent 网关的弹窗改成可交互的 |
+| 工具 | 当前请求的 `tool_name`；通知类事件退化用「最近一次工具」 | `Bash` |
+| 工具详情（等宽单行） | 从 `tool_input` 里挑代表性字段（`command` / `file_path` / `pattern`…） | `npm test` |
+| 项目 | hook 入参 `cwd` 的目录名（OpenCode 用 `directory`） | `pomodoro-fluent` |
+| 会话 | `session_id` 尾 6 位，避免刷一长串 uuid | `a1b2c3` |
+
+- **通知类事件（`Notification` / `Stop` / `session.error`）也会带上下文**，所以「休息建议」和异常通知同样能看出是哪个任务在跑。
+- 拿不到的字段直接不显示，不会出现空标签。
+- 想核对 hook 到底跟踪到了什么，跑：
+
+  ```bash
+  node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
+  # [{"session":"a1b2c3","source":"zcode","project":"pomodoro-fluent",
+  #   "task":"把 agent 网关的弹窗改成可交互的","lastTool":"Bash",
+  #   "lastToolDetail":"npm test","agentType":""}]
+  ```
+
+- 也可以在 HTTP 请求里直接传 `context`（字段同上），弹窗会照原样渲染：
+
+  ```bash
+  curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/json" \
+    -d '{"kind":"permission","context":{"agent":"ci","project":"pomodoro-fluent","task":"发布 v1.0.2","tool":"Bash","toolDetail":"npm run pack","session":"9f8e7d"},"permission":{"tool":"Bash"}}' \
+    http://127.0.0.1:5277/api/interaction
+  ```
+
 ## 开启与关闭
 
 设置抽屉（主窗口齿轮）→「Agent 集成」→ 启用 Agent 网关。默认开启，状态与端口持久化在 `userData/config.json`。
@@ -181,6 +214,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 |---|---|
 | `kind` | `ask` / `permission` / `notification` / `custom` |
 | `source` | 来源徽标：`zcode` / `claude-code` / `opencode` / `manual` |
+| `context` | 上下文：`{agent, agentType, agentId, session, project, task, tool, toolDetail}`，弹窗按空隐藏 |
 | `title` `message` `sub` `detail` | 标题 / 正文 / 附注 / 等宽详情（工具输入，可折叠滚动） |
 | `questions[]` | `ask` 用：`{id, question, header, multiSelect, custom, options:[{id,label,description}]}`，最多 4 题 × 6 选项 |
 | `permission` | `permission` 用：`{tool, rule, suggestions[], canAlways}` |
@@ -194,11 +228,14 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 CLI 直连模式（等价于上面的通用能力）：
 
 ```bash
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" ask --question "继续吗？" --option 继续 --option 停下
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" permission --tool Bash --detail "npm test"
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" ask --question "继续吗？" --option 继续 --option 停下 --task "重构缓存层" --agent zcode
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" permission --tool Bash --detail "npm test" --task "修登录超时" --agent claude-code
 node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" notify --title "构建完成" --message "可以回来验收了"
 node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" status
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 ```
+
+（`ask` / `permission` 加 `--task` `--agent` `--agent-type` `--project` 可以模拟上下文，方便调弹窗样式。）
 
 ## 事件类型（POST /api/event，只计数/通知，不等用户）
 

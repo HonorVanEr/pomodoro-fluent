@@ -276,9 +276,57 @@ function decide(action) {
   respond({ action, answers: {}, text: note ? note.value.trim() : '' });
 }
 
+// ---------------- 上下文条：会话 / 项目 / 工具 ----------------
+// 只渲染有的字段，避免弹窗出现空标签；工具与工具详情合并展示
+function renderContext(ctx) {
+  const wrap = el('notifyContext');
+  const c = ctx || {};
+  const parts = [];
+  if (c.tool) parts.push({ label: '工具', value: c.tool });
+  if (c.project) parts.push({ label: '项目', value: c.project });
+  if (c.session) parts.push({ label: '会话', value: c.session });
+  if (c.agentId && c.agentId !== c.session) parts.push({ label: '子 agent', value: c.agentId });
+
+  wrap.innerHTML = '';
+  if (parts.length) {
+    const meta = document.createElement('div');
+    meta.className = 'ctx-meta';
+    parts.forEach((it, i) => {
+      if (i) {
+        const sep = document.createElement('span');
+        sep.className = 'ctx-sep';
+        sep.textContent = '·';
+        meta.appendChild(sep);
+      }
+      const chip = document.createElement('span');
+      chip.className = 'ctx-chip';
+      const k = document.createElement('span');
+      k.className = 'ctx-key';
+      k.textContent = `${it.label} `;
+      const v = document.createElement('span');
+      v.className = 'ctx-val';
+      v.textContent = it.value;
+      chip.appendChild(k);
+      chip.appendChild(v);
+      meta.appendChild(chip);
+    });
+    wrap.appendChild(meta);
+  }
+
+  // 工具详情（命令 / 文件路径）单独一行，等宽
+  if (c.toolDetail) {
+    const d = document.createElement('div');
+    d.className = 'ctx-detail';
+    d.textContent = c.toolDetail;
+    d.title = c.toolDetail;
+    wrap.appendChild(d);
+  }
+
+  wrap.hidden = wrap.childElementCount === 0;
+}
+
 // ---------------- 通用：按钮行 ----------------
-function renderActions(actions, onPick) {
-  const wrap = el('notifyActions');
+function renderActions(actions, onPick) {  const wrap = el('notifyActions');
   wrap.innerHTML = '';
   actions.forEach((a) => {
     const btn = document.createElement('button');
@@ -321,6 +369,8 @@ function render(payload) {
   // 徽标：agent 类事件才显示「提问 / 权限 / 来源」，定时器通知不显示
   const kindBadge = el('notifyKind');
   const srcBadge = el('notifySource');
+  const agentBadge = el('notifyAgent');
+  const ctx = p.context || {};
   const isAgent = !TIMER_FLAVORS.has(state.flavor);
   const kindText = KIND_LABELS[state.kind] || '';
   if (isAgent && kindText) {
@@ -336,6 +386,25 @@ function render(payload) {
   } else {
     srcBadge.hidden = true;
   }
+  // 子 agent（Claude Code 的 agent_type / OpenCode 的 agent）
+  if (ctx.agentType) {
+    agentBadge.textContent = ctx.agentType;
+    agentBadge.hidden = false;
+  } else {
+    agentBadge.hidden = true;
+  }
+
+  // 任务行：这个会话在做什么（来自 UserPromptSubmit 的提示词）
+  const taskEl = el('notifyTask');
+  if (ctx.task) {
+    taskEl.textContent = ctx.task;
+    taskEl.title = ctx.task;
+    taskEl.hidden = false;
+  } else {
+    taskEl.hidden = true;
+  }
+
+  renderContext(ctx);
 
   el('notifyIcon').innerHTML = ICONS[state.flavor] || ICONS.agent;
 

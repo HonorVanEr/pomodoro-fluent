@@ -161,6 +161,117 @@ function cacheWrite(key, result) {
 }
 
 // ---------------------------------------------------------------------------
+// 会话上下文：每个 hook 都是独立进程，靠文件记住「这个会话在干什么」
+// 记：任务提示词（UserPromptSubmit）、子 agent 类型、最近工具、项目目录
+// 用途：弹窗上显示「哪个 agent / 哪个任务 / 在动哪个工具」，而不是只有来源
+// ---------------------------------------------------------------------------
+const SESSION_TTL_MS = 12 * 60 * 60 * 1000;
+function sessionKey(sessionId) {
+  return crypto.createHash('sha1').update(String(sessionId || 'unknown')).digest('hex').slice(0, 16);
+}
+function sessionFile(sessionId) {
+  return path.join(cacheDir(), `session-${sessionKey(sessionId)}.json`);
+}
+function sessionRead(sessionId) {
+  if (!sessionId) return null;
+  try {
+    const s = JSON.parse(fs.readFileSync(sessionFile(sessionId), 'utf8'));
+    if (!s || Date.now() - (s.at || 0) > SESSION_TTL_MS) return null;
+    return s;
+  } catch (e) { return null; }
+}
+function sessionMerge(sessionId, patch) {
+  if (!sessionId) return null;
+  try {
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    const next = { ...(sessionRead(sessionId) || {}), ...patch, sessionId, at: Date.now() };
+    fs.writeFileSync(sessionFile(sessionId), JSON.stringify(next));
+    return next;
+  } catch (e) { return null; }
+}
+function listSessions() {
+  const out = [];
+  try {
+    for (const f of fs.readdirSync(cacheDir())) {
+      if (!/^session-.*\.json$/.test(f)) continue;
+      try {
+        const s = JSON.parse(fs.readFileSync(path.join(cacheDir(), f), 'utf8'));
+        if (s && Date.now() - (s.at || 0) <= SESSION_TTL_MS) out.push(s);
+      } catch (e) { /* 跳过坏文件 */ }
+    }
+  } catch (e) { /* 目录不存在 */ }
+  return out.sort((a, b) => (b.at || 0) - (a.at || 0));
+}
+
+function collapse(text, n) {
+  const s = String(text || '').replace(/\s+/g, ' ').trim();
+  if (!s) return '';
+  return s.length > n ? s.slice(0, n - 1) + '…' : s;
+}
+
+// 会话 id 只露尾部，避免弹窗上出现一长串 uuid
+function shortSession(id) {
+  const s = String(id || '');
+  return s ? s.slice(-6) : '';
+}
+
+// 组装弹窗上下文：宿主 agent + 子 agent + 任务 + 项目 + 会话 + 工具
+function buildContext(payload, source, session, extra) {
+  const p = payload || {};
+  const s = session || {};
+  const cwd = p.cwd || p.working_directory || s.cwd || '';
+  return {
+    agent: source || '',
+    agentType: p.agent_type || p.agentType || s.agentType || '',
+    agentId: p.agent_id || s.agentId || '',
+    session: shortSession(p.session_id || p.sessionId || s.sessionId),
+    project: cwd ? path.basename(cwd) : (s.project || ''),
+    task: collapse(s.task || '', 160),
+    tool: s.lastTool || '',
+    toolDetail: s.lastToolDetail || '',
+    ...(extra || {}),
+  };
+}
+
+// 把当前 hook 事件累积进会话上下文
+function rememberContext(payload, event, source) {
+  const sessionId = payload.session_id || payload.sessionId || '';
+  if (!sessionId) return null;
+  const patch = {};
+  if (source) patch.source = source;
+  const cwd = payload.cwd || payload.working_directory;
+  if (cwd) patch.cwd = cwd;
+  if (payload.agent_type || payload.agentType) patch.agentType = payload.agent_type || payload.agentType;
+  switch (event) {
+    case 'SessionStart':
+      patch.task = '';                       // 新会话：清掉上一轮的任务描述
+      if (payload.model) patch.model = String(payload.model);
+      break;
+    case 'UserPromptSubmit':
+      if (payload.prompt) patch.task = collapse(payload.prompt, 400);
+      break;
+    case 'PreToolUse':
+    case 'PostToolUse':
+    case 'PostToolUseFailure':
+    case 'PermissionRequest':
+      if (payload.tool_name) {
+        patch.lastTool = String(payload.tool_name);
+        patch.lastToolDetail = collapse(ruleContentFor(payload.tool_name, payload.tool_input), 160);
+      }
+      break;
+    case 'Stop':
+      if (payload.last_assistant_message) {
+        patch.lastAssistant = collapse(payload.last_assistant_message, 200);
+      }
+      break;
+    default:
+      break;
+  }
+  if (!Object.keys(patch).length) return sessionRead(sessionId);
+  return sessionMerge(sessionId, patch) || sessionRead(sessionId);
+}
+
+// ---------------------------------------------------------------------------
 // 通用小工具
 // ---------------------------------------------------------------------------
 function summarizeToolInput(toolInput) {
@@ -293,7 +404,7 @@ function detectProtocol(payload) {
 // ---------------------------------------------------------------------------
 // Claude Code / ZCode（事件名一致，输出同形）
 // ---------------------------------------------------------------------------
-async function handleAsk(payload, source, gw) {
+async function handleAsk(payload, source, gw, context) {
   const toolInput = payload.tool_input || {};
   const questions = questionsFromToolInput(toolInput);
   const key = cacheKeyFor(payload);
@@ -309,6 +420,7 @@ async function handleAsk(payload, source, gw) {
       title: 'Agent 提问',
       message: questions.length === 1 ? questions[0].question : `${questions.length} 个问题等待回答`,
       questions,
+      context: { ...(context || {}), tool: String(payload.tool_name || 'AskUserQuestion'), toolDetail: '' },
       timeoutMs: ms,
     }, ms);
     cacheWrite(key, result || {});
@@ -365,7 +477,7 @@ async function handleAsk(payload, source, gw) {
   return null;
 }
 
-async function handlePermission(payload, source, gw) {
+async function handlePermission(payload, source, gw, context) {
   const tool = String(payload.tool_name || '工具');
   const toolInput = payload.tool_input || {};
   const ms = timeoutMs();
@@ -381,6 +493,7 @@ async function handlePermission(payload, source, gw) {
       suggestions: payload.permission_suggestions || [],
       canAlways: flag('POMODORO_ALWAYS_ALLOW', true) !== false,
     },
+    context: { ...(context || {}), tool, toolDetail: collapse(ruleContentFor(tool, toolInput), 160) },
     timeoutMs: ms,
   }, ms);
 
@@ -427,24 +540,27 @@ async function handlePermission(payload, source, gw) {
 async function runAncliMode(gw, payload) {
   const source = detectSource(payload);
   const event = String(payload.hook_event_name || '');
+  // 累积会话上下文（任务 / 子 agent / 最近工具 / 项目），供弹窗展示
+  const session = rememberContext(payload, event, source);
+  const context = buildContext(payload, source, session);
 
   // 提问（AskUserQuestion）：PreToolUse 与 PermissionRequest 都可能触发
   if (isAskTool(payload) && flag('POMODORO_ASK', true) !== false) {
-    const out = await handleAsk(payload, source, gw);
+    const out = await handleAsk(payload, source, gw, context);
     if (out) process.stdout.write(JSON.stringify(out));
     return;
   }
 
   // 权限请求
   if (event === 'PermissionRequest' && flag('POMODORO_PERMISSION', true) !== false) {
-    const out = await handlePermission(payload, source, gw);
+    const out = await handlePermission(payload, source, gw, context);
     if (out) process.stdout.write(JSON.stringify(out));
     return;
   }
 
   // 普通 PreToolUse 双向确认（可选开启，默认关）
   if (event === 'PreToolUse' && flag('POMODORO_CONFIRM_PRETOOL', false) === true) {
-    const out = await handlePermission(payload, source, gw);
+    const out = await handlePermission(payload, source, gw, context);
     if (out) process.stdout.write(JSON.stringify(out));
     return;
   }
@@ -463,12 +579,31 @@ async function runAncliMode(gw, payload) {
   const body = bodyByEvent[event];
   if (!body) return; // 未识别的事件：静默忽略
   if (event === 'Notification' && !body.message) body.message = 'Agent 需要你的确认';
+  // 通知类也带上上下文：弹窗能显示是哪个任务、在动哪个工具
+  if (event === 'Notification' || event === 'Stop') body.context = context;
   await postEvent(gw, body);
 }
 
 // ---------------------------------------------------------------------------
 // OpenCode
 // ---------------------------------------------------------------------------
+// OpenCode 侧的上下文由插件随请求带上：sessionID / directory / sessionTitle
+function openCodeContext(payload, extra) {
+  const p = payload || {};
+  const dir = p.directory || '';
+  return {
+    agent: 'opencode',
+    agentType: String(p.agent || p.agentType || ''),
+    agentId: '',
+    session: shortSession(p.sessionID || p.sessionId),
+    project: p.project || (dir ? path.basename(dir) : ''),
+    task: collapse(p.sessionTitle || p.title || '', 160),
+    tool: '',
+    toolDetail: '',
+    ...(extra || {}),
+  };
+}
+
 async function runOpenCodePermission(gw, payload) {
   const p = (payload && payload.permission) || payload || {};
   const type = String(p.type || p.permission || 'tool');
@@ -482,6 +617,7 @@ async function runOpenCodePermission(gw, payload) {
     message: Array.isArray(patterns) ? patterns.join('  ') : String(patterns || ''),
     detail: summarizeToolInput(meta),
     permission: { tool: type, rule: String(patterns[0] || ''), suggestions: [], canAlways: false },
+    context: openCodeContext(payload, { tool: type, toolDetail: collapse(String(patterns[0] || ''), 160) }),
     timeoutMs: ms,
   }, ms);
 
@@ -515,6 +651,7 @@ async function runOpenCodeQuestion(gw, payload) {
     title: 'Agent 提问',
     message: questions.length === 1 ? questions[0].question : `${questions.length} 个问题等待回答`,
     questions,
+    context: openCodeContext(p, { tool: 'question' }),
     timeoutMs: ms,
   }, ms);
 
@@ -615,6 +752,9 @@ async function runOpenCodeEvent(gw, payload) {
     kind,
     source: 'opencode',
     message: kind === 'notification' ? String(props.error || props.message || 'OpenCode 会话异常') : '',
+    context: openCodeContext(props, {
+      tool: kind === 'notification' && props.error ? 'error' : '',
+    }),
   });
 }
 
@@ -629,6 +769,20 @@ function collectFlag(args, name) {
   return out;
 }
 
+// 手动调试时的上下文（用于验证弹窗上的「任务 / agent / 工具」展示）
+function manualContext(args) {
+  const first = (n) => collectFlag(args, n)[0] || '';
+  return {
+    agent: first('agent') || 'manual',
+    agentType: first('agent-type'),
+    session: 'manual',
+    project: first('project') || 'manual',
+    task: first('task'),
+    tool: '',
+    toolDetail: '',
+  };
+}
+
 async function runManualAsk(gw, args) {
   const questions = (collectFlag(args, 'question') || ['手动测试提问']).map((q, i) => ({
     id: `q${i}`,
@@ -640,7 +794,9 @@ async function runManualAsk(gw, args) {
   }));
   const ms = timeoutMs();
   const r = await postInteraction(gw, {
-    kind: 'ask', source: 'manual', title: '手动测试 · 提问', questions, timeoutMs: ms,
+    kind: 'ask', source: 'manual', title: '手动测试 · 提问', questions,
+    context: { ...manualContext(args), tool: 'AskUserQuestion' },
+    timeoutMs: ms,
   }, ms);
   process.stdout.write(JSON.stringify(r, null, 2) + '\n');
 }
@@ -651,7 +807,9 @@ async function runManualPermission(gw, args) {
   const ms = timeoutMs();
   const r = await postInteraction(gw, {
     kind: 'permission', source: 'manual', title: '手动测试 · 权限',
-    detail, permission: { tool, rule: detail || '*', canAlways: true }, timeoutMs: ms,
+    detail, permission: { tool, rule: detail || '*', canAlways: true },
+    context: { ...manualContext(args), tool, toolDetail: detail },
+    timeoutMs: ms,
   }, ms);
   process.stdout.write(JSON.stringify(r, null, 2) + '\n');
 }
@@ -794,10 +952,11 @@ function usage() {
     '  pomodoro-hook.js opencode-permission   # OpenCode 插件：权限请求 → stdout {status}',
     '  pomodoro-hook.js opencode-question     # OpenCode 插件：提问 → stdout {answers}',
     '  pomodoro-hook.js opencode-event        # OpenCode 插件：会话事件上报',
-    '  pomodoro-hook.js ask --question "Q" --option A --option B',
-    '  pomodoro-hook.js permission --tool Bash --detail "npm test"',
+    '  pomodoro-hook.js ask --question "Q" --option A --option B [--task "任务" --agent zcode]',
+    '  pomodoro-hook.js permission --tool Bash --detail "npm test" [--task "任务"]',
     '  pomodoro-hook.js notify --title T --message M [--sub S] [--type agent]',
     '  pomodoro-hook.js status',
+    '  pomodoro-hook.js sessions               # 查看 hook 跟踪到的会话（任务/最近工具/项目）',
     '  pomodoro-hook.js install --agent zcode|claude|opencode|all [--print] [--clean]',
     '',
     '  --print  只打印将要写入的配置，不动文件',
@@ -871,6 +1030,22 @@ async function main() {
   if (cmd === 'status') {
     const r = await request(gw.port, gw.token, 'GET', '/api/status', null, 8000);
     process.stdout.write(JSON.stringify(r, null, 2) + '\n');
+    return;
+  }
+
+  // 看看 hook 都跟踪到了哪些会话（任务 / 最近工具 / 项目）
+  if (cmd === 'sessions') {
+    const list = listSessions().map((s) => ({
+      session: shortSession(s.sessionId),
+      source: s.source || '',
+      project: s.project || (s.cwd ? path.basename(s.cwd) : ''),
+      task: s.task || '',
+      lastTool: s.lastTool || '',
+      lastToolDetail: s.lastToolDetail || '',
+      agentType: s.agentType || '',
+      since: s.at ? new Date(s.at).toLocaleString() : '',
+    }));
+    process.stdout.write(JSON.stringify(list, null, 2) + '\n');
     return;
   }
 

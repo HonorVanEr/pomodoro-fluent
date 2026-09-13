@@ -45,6 +45,12 @@ const BREAK_SUGGEST_TIMEOUT_MS = 2 * 60 * 1000;
 // 弹窗文案长度上限（超长截断；结构化内容不再走 URL query，可放宽）
 const CAPS = { title: 120, message: 360, sub: 160, detail: 2000 };
 
+// 上下文（哪个 agent / 哪个任务 / 在动哪个工具）各字段上限
+const CTX_CAPS = {
+  agent: 32, agentType: 60, agentId: 40, session: 16,
+  project: 60, task: 200, tool: 60, toolDetail: 160,
+};
+
 function capText(str, n) {
   if (typeof str !== 'string') return '';
   return str.length > n ? str.slice(0, n - 1) + '…' : str;
@@ -165,6 +171,17 @@ function normalizeActions(actions) {
     }));
 }
 
+// 上下文：agent（宿主/子 agent）+ 任务提示词 + 工具 + 会话/项目
+// 由 hook 侧按会话累积后随请求带上；缺哪项就留空，弹窗按空隐藏
+function normalizeContext(c) {
+  const o = c && typeof c === 'object' ? c : {};
+  const out = {};
+  for (const k of Object.keys(CTX_CAPS)) {
+    out[k] = capText(typeof o[k] === 'string' ? o[k] : '', CTX_CAPS[k]);
+  }
+  return out;
+}
+
 function normalizeInteraction(input) {
   const o = input || {};
   const kind = isValidKind(o.kind) ? o.kind : 'custom';
@@ -190,6 +207,7 @@ function normalizeInteraction(input) {
       : conf.defaultAction,
     actions: actions.length ? actions : (kind === 'custom' ? [{ id: 'ok', label: '知道了' }] : []),
     input: normalizeInput(o.input, kind),
+    context: normalizeContext(o.context),
   };
   if (kind === 'ask') norm.questions = normalizeQuestions(o.questions);
   if (kind === 'permission') norm.permission = normalizePermission(o.permission, o);
@@ -368,6 +386,7 @@ function createGateway(deps) {
           message: capText(e.message || '', CAPS.message),
           sub: src,
           source: e.source,
+          context: e.context,
         });
         triggered = 'notify';
         break;
@@ -376,7 +395,7 @@ function createGateway(deps) {
       case 'stop':
         // 主 agent 回合结束（任务完成/空闲）
         activity.stops += 1;
-        if (maybeSuggestBreak()) triggered = 'break-suggest';
+        if (maybeSuggestBreak(e)) triggered = 'break-suggest';
         break;
 
       case 'session-start':
@@ -393,16 +412,18 @@ function createGateway(deps) {
   }
 
   // Agent 空闲且仍在专注时段 → 弹「休息建议」，一键跳到休息
-  function maybeSuggestBreak() {
+  function maybeSuggestBreak(ev) {
     // 有未决交互时不打扰：别把正在等待决策的权限/提问窗顶掉
     if (pendingInteractions.size > 0) return false;
     const t = getTimerState();
     if (!t || t.phase !== 'work' || !t.running) return false;
     if (Date.now() - lastBreakSuggestAt < BREAK_SUGGEST_COOLDOWN_MS) return false;
     lastBreakSuggestAt = Date.now();
+    const e = ev || {};
+    const ctx = e.context || {};
     requestConfirm({
       title: 'Agent 空闲了',
-      message: '这轮任务跑完了，要趁机休息一下吗？',
+      message: ctx.task ? `「${ctx.task}」这轮跑完了，要趁机休息一下吗？` : '这轮任务跑完了，要趁机休息一下吗？',
       sub: '选择「休息一下」将提前结束本段专注进入休息',
       actions: [
         { id: 'break', label: '休息一下', style: 'primary' },
@@ -411,6 +432,8 @@ function createGateway(deps) {
       ],
       defaultAction: 'ignore',
       timeoutMs: BREAK_SUGGEST_TIMEOUT_MS,
+      source: e.source,
+      context: ctx,
     }).then(({ action }) => {
       if (action === 'break') sendTimerCommand('skip');
     });
