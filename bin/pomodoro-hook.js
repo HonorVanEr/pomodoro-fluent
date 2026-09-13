@@ -29,17 +29,22 @@
 // 环境变量：
 //   POMODORO_GATEWAY_FILE      指定 gateway.json 路径
 //   POMODORO_PORT/TOKEN        直接指定网关端口与 token
-//   POMODORO_SOURCE            来源标记：zcode | claude-code | opencode
+//   POMODORO_SOURCE            来源标记：zcode | claude-code | opencode | vscode | cursor | codex | qwen
 //   POMODORO_ASK               1/0，AskUserQuestion 是否接管（默认 1）
 //   POMODORO_PERMISSION        1/0，PermissionRequest 是否接管（默认 1）
 //   POMODORO_CONFIRM_PRETOOL   1 开启普通 PreToolUse 双向确认（默认 0）
-//   POMODORO_VSCODE_APPROVE_TOOLS  VS Code 下走 PreToolUse 审批的工具正则
-//                              （默认只拦 runInTerminal/runCommands/Bash/
-//                                deleteFile/editFiles 等高风险工具；空串=关闭）
+//   POMODORO_VSCODE_APPROVE_TOOLS  VS Code 下走 PreToolUse 审批的工具正则，
+//                              匹配前会先把工具名归一化（去命名空间/下划线/大小写），
+//                              所以 run_in_terminal 与 runInTerminal 等价。
+//                              （默认只拦终端执行与删除/移动类破坏性工具；
+//                                `.*` = 每个工具都问；空串 = 关闭审批）
+//   POMODORO_LOCAL_ALWAYS_ALLOW 0 关闭本地「始终允许」规则缓存
+//                              （VS Code / Cursor 不支持规则回写，靠它落地，默认 1）
 //   POMODORO_ALWAYS_ALLOW      0 隐藏「始终允许」按钮（默认 1）
 //   POMODORO_PERMISSION_DEST   始终允许写哪里（默认 projectSettings）
 //   POMODORO_TIMEOUT_S         弹窗等待秒数（默认 240，上限 590）
-//   POMODORO_ASK_MODE          answers | deny（默认 answers）
+//   POMODORO_ASK_MODE          answers | deny（默认 answers；VS Code 默认 deny，
+//                              因为它的提问工具是 QuickPick，答案不在入参里）
 //   POMODORO_HOOK_PATH         OpenCode 插件定位本脚本用
 // ---------------------------------------------------------------------------
 
@@ -161,6 +166,65 @@ function cacheWrite(key, result) {
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(path.join(dir, `${key}.json`), JSON.stringify({ at: Date.now(), result }));
   } catch (e) { /* 缓存失败不影响主流程 */ }
+}
+
+// ---------------------------------------------------------------------------
+// 本地「始终允许」规则
+// Claude Code / ZCode 支持把规则回写给宿主（updatedPermissions），但它不是所有
+// 宿主都认：VS Code 的 PreToolUse 输出里没有这个字段，Cursor 也一样。
+// 那两边只返回一次 allow 的话，下次同类调用还会再弹窗 —— 用户选了「始终允许」
+// 却每次都问，就是假的。所以对这类宿主，把规则记到本地，后续命中直接放行，
+// 不再弹窗也不再长轮询。
+// 关掉：POMODORO_LOCAL_ALWAYS_ALLOW=0
+// ---------------------------------------------------------------------------
+const LOCAL_RULE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const LOCAL_RULE_SOURCES = new Set(['vscode', 'cursor']);
+
+function localRuleFile() {
+  return path.join(cacheDir(), 'always-allow.json');
+}
+function localRuleEnabled(source) {
+  if (flag('POMODORO_LOCAL_ALWAYS_ALLOW', true) === false) return false;
+  return LOCAL_RULE_SOURCES.has(String(source || ''));
+}
+function localRuleReadAll() {
+  try {
+    const list = JSON.parse(fs.readFileSync(localRuleFile(), 'utf8'));
+    if (!Array.isArray(list)) return [];
+    const now = Date.now();
+    return list.filter((r) => r && (!r.at || now - r.at < LOCAL_RULE_TTL_MS));
+  } catch (e) { return []; }
+}
+function localRuleKey(source, tool) {
+  return `${String(source || '')}:${normalizeToolName(tool)}`;
+}
+// 规则内容做「包含」判断：`npm run build --watch` 命中 `npm run build` 算允许
+function localRuleMatch(source, tool, rule) {
+  if (!localRuleEnabled(source)) return false;
+  const key = localRuleKey(source, tool);
+  const r = String(rule || '*');
+  return localRuleReadAll().some((item) => {
+    if (localRuleKey(item.source, item.tool) !== key) return false;
+    const saved = String(item.rule || '*');
+    if (saved === '*' || r === '*') return true;
+    return r.includes(saved) || saved.includes(r);
+  });
+}
+function localRuleAdd(source, tool, rule) {
+  if (!localRuleEnabled(source)) return;
+  try {
+    const key = localRuleKey(source, tool);
+    const r = String(rule || '*');
+    const list = localRuleReadAll().filter((item) => {
+      if (localRuleKey(item.source, item.tool) !== key) return true;
+      const saved = String(item.rule || '*');
+      // 同工具下，已有规则更宽泛（或相同）就不必再记一条
+      return !(saved === '*' || saved === r);
+    });
+    list.push({ source, tool, rule: r, at: Date.now() });
+    fs.mkdirSync(cacheDir(), { recursive: true });
+    fs.writeFileSync(localRuleFile(), JSON.stringify(list.slice(-200), null, 0));
+  } catch (e) { /* 记不上就算了，只是下次还会问 */ }
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +401,10 @@ function questionsFromToolInput(toolInput) {
       question: String(text),
       header: String((q && q.header) || ''),
       multiSelect: !!(q && (q.multiSelect || q.multiple)),
-      custom: q && typeof q.custom === 'boolean' ? q.custom : options.length === 0,
+      // allowFreeformInput / openEnded 是 VS Code 提问工具的写法；options 为空也要给输入框
+      custom: q && typeof q.custom === 'boolean'
+        ? q.custom
+        : (options.length === 0 || !!(q && (q.allowFreeformInput || q.openEnded))),
       options,
     };
   }).filter((q) => q.question);
@@ -377,7 +444,24 @@ async function postEvent(gw, body) {
 // ---------------------------------------------------------------------------
 // 协议识别
 // ---------------------------------------------------------------------------
-const ASK_TOOL_RE = /^(AskUserQuestion|AskUser|ask_user_question|question|vscode_askQuestions|askQuestion)$/i;
+// 工具名归一化：去掉命名空间（vscode/askQuestions）、大小写、下划线/连字符差异。
+// 各宿主命名风格差得很远：Claude/ZCode 用 AskUserQuestion，VS Code 用
+// vscode/askQuestions，Cursor 用 question，Qwen 沿用 Claude 的。
+function normalizeToolName(name) {
+  return String(name || '')
+    .replace(/^[A-Za-z0-9_.-]+\//, '')   // 去掉 vscode/ copilot/ 之类的命名空间
+    .replace(/[^A-Za-z0-9]/g, '')        // 去掉 _ - 空格
+    .replace(/^vscode/i, '')             // vscode_askQuestions 这种前缀式
+    .toLowerCase();
+}
+
+const ASK_TOOL_SET = new Set([
+  'askuserquestion', 'askuserquestions', 'askuser', 'askquestions', 'askquestion', 'question',
+]);
+
+function isAskToolName(name) {
+  return ASK_TOOL_SET.has(normalizeToolName(name));
+}
 
 // Cursor 的 hook 事件名是 camelCase（其余宿主是 PascalCase）
 const CURSOR_EVENTS = new Set([
@@ -390,9 +474,9 @@ const CURSOR_EVENTS = new Set([
 
 function isAskTool(payload) {
   const tool = String(payload.tool_name || payload.tool || payload.name || '');
-  if (ASK_TOOL_RE.test(tool)) return true;
+  if (isAskToolName(tool)) return true;
   const ti = payload.tool_input || payload.toolInput;
-  if (ti && Array.isArray(ti.questions) && ti.questions.length && !ti.command && !ti.file_path) return true;
+  if (ti && Array.isArray(ti.questions) && ti.questions.length && !ti.command && !ti.file_path && !ti.filePath) return true;
   // VS Code Copilot 的提问工具入参形如 { questions: [...] } 或 { question: "..." }
   if (ti && typeof ti === 'object' && typeof ti.question === 'string' && !ti.command) return true;
   return false;
@@ -433,21 +517,36 @@ function detectProtocol(payload) {
 // VS Code Copilot 没有独立的 PermissionRequest 事件，审批只能挂在 PreToolUse 上。
 // 但 PreToolUse 对**每个**工具调用都会触发，全拦会变成弹窗轰炸 →
 // 默认只拦高风险工具（可用 POMODORO_VSCODE_APPROVE_TOOLS 改，设为空串即关闭）。
+// VS Code Copilot 没有独立权限事件（只有 8 个 hook 事件，无 PermissionRequest /
+// Notification），审批只能挂在 PreToolUse 上。而 VS Code **会忽略 matcher**，
+// 所有 hook 在每次工具调用时都会跑 → 全拦会变成弹窗轰炸。
+// 所以：默认只拦高风险工具，且判断放在脚本里做（matcher 不可靠）。
+//
+// 工具名归一化后再比对：VS Code 官方用 run_in_terminal / create_file /
+// replace_string_in_file 这类下划线命名，Claude harness 里又变成 Bash / Write，
+// 归一化后（runinterminal / createfile / replacestringinfile / bash / write）一网打尽。
 const VSCODE_APPROVE_DEFAULT = [
-  'runInTerminal', 'runCommands', 'runNotebookCell', 'runTests', 'runTask',
-  'Bash', 'Shell', 'terminal', 'deleteFile', 'renameFile', 'createDirectory',
-  'copyFiles', 'moveFiles', 'applyPatch', 'editFiles',
+  // 执行命令 / 终端
+  'runinterminal', 'runterminalcommand', 'runcommand', 'runcommands',
+  'runcommandsinterminal', 'runnotebookcell', 'runtask', 'runtests',
+  'executecommand', 'bash', 'shell', 'terminal',
+  // 删除 / 移动类破坏性文件操作
+  'deletefile', 'deletefiles', 'removefile', 'removefiles',
+  'renamefile', 'renamefiles', 'movefiles', 'movefile',
+  'copyfiles', 'copyfile', 'createdirectory', 'applypatch',
 ].join('|');
 
 function shouldApprovePreTool(payload, source) {
   if (flag('POMODORO_CONFIRM_PRETOOL', false) === true) return true;   // 手动全量开启
   if (source !== 'vscode') return false;
+  const raw = String(payload.tool_name || payload.tool || '');
+  const name = normalizeToolName(raw);
   const pat = env.POMODORO_VSCODE_APPROVE_TOOLS === undefined
     ? VSCODE_APPROVE_DEFAULT
     : String(env.POMODORO_VSCODE_APPROVE_TOOLS);
   if (!pat) return false;
   try {
-    return new RegExp(pat, 'i').test(String(payload.tool_name || payload.tool || ''));
+    return new RegExp(pat, 'i').test(name) || new RegExp(pat, 'i').test(raw);
   } catch (e) {
     return false;   // 正则写错了就当不拦，别把 agent 卡死
   }
@@ -486,13 +585,22 @@ async function handleAsk(payload, source, gw, context) {
   // 用户作答：注入 answers 让原生 UI 不再弹出
   if (decided && result.action === 'submit') {
     const updatedInput = { ...toolInput, answers };
-    if (String(env.POMODORO_ASK_MODE || 'answers').toLowerCase() === 'deny') {
+    // VS Code 的提问工具（vscode/askQuestions）弹的是 QuickPick，答案不在入参里、
+    // 改 updatedInput 只换了问题本身，改不动用户选择 → 默认走 deny + 把答案写进原因。
+    // 其它宿主默认走 updatedInput.answers（Claude Code / ZCode），可用 POMODORO_ASK_MODE 覆盖。
+    const askMode = String(
+      env.POMODORO_ASK_MODE || (source === 'vscode' ? 'deny' : 'answers')
+    ).toLowerCase();
+    if (askMode === 'deny') {
       // 备用通道：部分宿主不认 updatedInput.answers，改成 deny + 把答案塞进原因
+      const reason = `用户在番茄钟弹窗中的回答：\n${formatAnswerMap(answers)}`;
       return {
         hookSpecificOutput: {
           hookEventName: 'PreToolUse',
           permissionDecision: 'deny',
-          permissionDecisionReason: `用户在番茄钟弹窗中的回答：\n${formatAnswerMap(answers)}`,
+          permissionDecisionReason: reason,
+          // VS Code 里 additionalContext 才是「给模型看」的字段，reason 只展示给用户
+          additionalContext: reason,
         },
       };
     }
@@ -532,6 +640,17 @@ async function handleAsk(payload, source, gw, context) {
 async function handlePermission(payload, source, gw, context) {
   const tool = String(payload.tool_name || '工具');
   const toolInput = payload.tool_input || {};
+  const rule = ruleContentFor(tool, toolInput);
+  const event = payload.hook_event_name;
+
+  // 宿主不认 updatedPermissions（VS Code / Cursor）时，靠本地规则实现「始终允许」
+  if (localRuleMatch(source, tool, rule)) {
+    if (event === 'PermissionRequest') {
+      return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', message: '命中本地「始终允许」规则' } } };
+    }
+    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: '命中番茄钟「始终允许」规则' } };
+  }
+
   const ms = timeoutMs();
   const result = await postInteraction(gw, {
     kind: 'permission',
@@ -541,17 +660,16 @@ async function handlePermission(payload, source, gw, context) {
     detail: summarizeToolInput(toolInput),
     permission: {
       tool,
-      rule: ruleContentFor(tool, toolInput),
+      rule,
       suggestions: payload.permission_suggestions || [],
       canAlways: flag('POMODORO_ALWAYS_ALLOW', true) !== false,
     },
-    context: { ...(context || {}), tool, toolDetail: collapse(ruleContentFor(tool, toolInput), 160) },
+    context: { ...(context || {}), tool, toolDetail: collapse(rule, 160) },
     timeoutMs: ms,
   }, ms);
 
-  if (!result) return null;
+  if (!result) return vscodeAskFallback(source, '番茄钟没有收到决策（应用未运行或弹窗被关掉）');
   const decided = result.decidedBy === 'user';
-  const event = payload.hook_event_name;
 
   if (decided && result.action === 'allow') {
     const out = { behavior: 'allow', message: result.text || '用户通过番茄钟弹窗允许' };
@@ -561,6 +679,7 @@ async function handlePermission(payload, source, gw, context) {
 
   if (decided && result.action === 'allow-always') {
     const updatedPermissions = buildPermissionUpdates(tool, toolInput, payload.permission_suggestions);
+    localRuleAdd(source, tool, rule);   // 兜底：宿主不认 updatedPermissions 时也生效
     if (event === 'PermissionRequest') {
       return {
         hookSpecificOutput: {
@@ -586,7 +705,21 @@ async function handlePermission(payload, source, gw, context) {
   }
 
   // 未决策：不输出，走宿主原生询问
-  return null;
+  return vscodeAskFallback(source, '番茄钟未收到决策，请手动确认');
+}
+
+// VS Code 没有 PermissionRequest，PreToolUse 若「不做决策」，就会按 VS Code 自己的
+// 审批设置走 —— 用户可能已经把终端命令设成免确认，等于被静默放行。
+// 所以这里显式回一个 ask，强制弹出原生确认：宁可多问一次，也不替他放行。
+function vscodeAskFallback(source, reason) {
+  if (String(source) !== 'vscode') return null;
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'ask',
+      permissionDecisionReason: reason,
+    },
+  };
 }
 
 async function runAncliMode(gw, payload) {
@@ -622,10 +755,12 @@ async function runAncliMode(gw, payload) {
     Notification: { kind: 'notification', message: payload.message || '', source },
     Stop: { kind: 'stop', source },
     SubagentStop: { kind: 'subagent-stop', source },
+    SubagentStart: { kind: 'subagent-start', source },
     PostToolUse: { kind: 'tool-after', tool: payload.tool_name || '', source },
     PreToolUse: { kind: 'tool-before', tool: payload.tool_name || '', source },
     SessionStart: { kind: 'session-start', source },
     SessionEnd: { kind: 'session-end', source },
+    PreCompact: { kind: 'pre-compact', source },
     UserPromptSubmit: { kind: 'prompt', source },
   };
   const body = bodyByEvent[event];
@@ -633,6 +768,8 @@ async function runAncliMode(gw, payload) {
   if (event === 'Notification' && !body.message) body.message = 'Agent 需要你的确认';
   // 通知类也带上上下文：弹窗能显示是哪个任务、在动哪个工具
   if (event === 'Notification' || event === 'Stop') body.context = context;
+  // 注意：Stop 只上报，绝不输出 decision:"block" —— 那会阻止 agent 收尾，
+  // 甚至把它拖进自动续跑的循环（VS Code 的 stop_hook_active 就是防这个的）
   await postEvent(gw, body);
 }
 
@@ -736,16 +873,24 @@ async function runCursorMode(gw, payload) {
 
     // 权限：默认接管（Cursor 没有单独的 PermissionRequest 事件）
     if (flag('POMODORO_PERMISSION', true) !== false) {
+      // 本地「始终允许」规则：Cursor 的 preToolUse 不回写规则，只能自己记
+      if (localRuleMatch('cursor', tool, detail)) {
+        writeCursor(event === 'beforeReadFile'
+          ? { permission: 'allow' }
+          : { permission: 'allow', agent_message: '命中番茄钟「始终允许」规则' });
+        return;
+      }
       const r = await postInteraction(gw, {
         kind: 'permission', source: 'cursor',
         title: event === 'beforeShellExecution' ? '允许执行命令？' : `${tool} 需要授权`,
         message: event === 'beforeShellExecution' ? String(payload.command || '') : '',
         detail: event === 'beforeShellExecution' ? `cwd: ${cwd}` : summarizeToolInput(toolInput),
-        permission: { tool, rule: detail, suggestions: [], canAlways: false },
+        permission: { tool, rule: detail, suggestions: [], canAlways: true },
         context: ctx, timeoutMs: ms,
       }, ms);
       if (r && r.decidedBy === 'user') {
         if (r.action === 'allow' || r.action === 'allow-always') {
+          if (r.action === 'allow-always') localRuleAdd('cursor', tool, detail);
           // beforeReadFile 只认 permission，不接受消息字段
           writeCursor(event === 'beforeReadFile'
             ? { permission: 'allow' }
@@ -762,8 +907,9 @@ async function runCursorMode(gw, payload) {
       return;
     }
 
-    // 不接管权限时保持静默放行
-    writeCursor(event === 'beforeReadFile' ? { permission: 'allow' } : { permission: 'allow' });
+    // 不接管权限：不回任何决定，交回 Cursor 原生审批流程
+    // （以前这里回 permission:allow，等于替用户强制放行，属于越权）
+    writeCursor({});
     return;
   }
 
@@ -1144,9 +1290,11 @@ function installQwen(print) {
   writeJson(file, installAncliHooks(file, 'qwen', print), print);
 }
 
-// VS Code Copilot Agent hooks（1.109+）：与 Claude Code 同格式，
-// 用户级放 ~/.copilot/hooks/*.json；事件集不同（无 PermissionRequest，
-// 审批走 PreToolUse），条目用 timeoutSec（秒）
+// VS Code Copilot Agent hooks：与 Claude Code 同格式，但事件集只有 8 个
+// （SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact /
+//   SubagentStart / SubagentStop / Stop），**没有** PermissionRequest 与 Notification。
+// 用户级放 ~/.copilot/hooks/*.json；条目用 timeout（单位：秒，默认 30）。
+// 长轮询等待用户在弹窗里点按钮，默认 30s 会直接被宿主掐断 → 显式放大到 600s。
 function installVscode(print) {
   const file = path.join(os.homedir(), '.copilot', 'hooks', 'pomodoro.json');
   const cfg = readJson(file);
@@ -1158,15 +1306,24 @@ function installVscode(print) {
     const list = cfg.hooks[evt] || (cfg.hooks[evt] = []);
     if (!list.some((e) => /pomodoro-hook\.js/.test(String(e.command || '')))) list.push(entry(extra));
   };
-  // 提问与权限都靠 PreToolUse（VS Code 没有 PermissionRequest）
-  add('PreToolUse', { timeoutSec: 600 });
-  add('SessionStart');
-  add('UserPromptSubmit');
-  add('PostToolUse');
-  add('SubagentStart');
-  add('SubagentStop');
-  add('Stop');
+  // 提问与审批都靠 PreToolUse（VS Code 没有 PermissionRequest）；
+  // VS Code 会忽略 matcher，所以「只拦高风险工具」的判断写在 CLI 里
+  add('PreToolUse', { timeout: 600 });
+  add('PostToolUse', { timeout: 30 });
+  add('SessionStart', { timeout: 30 });
+  add('UserPromptSubmit', { timeout: 30 });
+  add('SubagentStart', { timeout: 30 });
+  add('SubagentStop', { timeout: 30 });
+  add('PreCompact', { timeout: 30 });
+  add('Stop', { timeout: 30 });
   writeJson(file, cfg, print);
+  if (!print) {
+    process.stdout.write(
+      '提示：VS Code 默认还会读取 ~/.claude/settings.json（Claude Code 的 hooks），\n' +
+      '      两处都装会对同一次工具调用跑两遍。不想重复就在 VS Code 设置里加：\n' +
+      '      "chat.hookFilesLocations": { "~/.claude/settings.json": false }\n'
+    );
+  }
 }
 
 // Cursor（~/.cursor/hooks.json，用户级；项目级可放 .cursor/hooks.json）

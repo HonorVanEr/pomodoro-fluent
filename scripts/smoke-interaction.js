@@ -25,6 +25,8 @@ let lastPopup = null;
 const popups = [];
 // 弹窗脚本：按 kind 指定用户会点什么
 let plan = { permission: 'allow', ask: 'submit', askOption: 0, text: '' };
+// 置 true 时桩「装死」不回应，用来验证 hook 侧拿不到决策时的兜底（超时/关窗）
+let holdInteraction = false;
 
 const gateway = createGateway({
   showPopup: (payload) => {
@@ -32,6 +34,7 @@ const gateway = createGateway({
     popups.push(payload);
     const id = payload.id;
     if (payload.title === '[timeout-probe]') return; // 该用例故意不回应，验证超时兜底
+    if (holdInteraction) return;                     // 同上，走 hook CLI 的真实超时路径
     if (!id) return; // 纯通知，无需回应
     if (payload.kind === 'permission') {
       setTimeout(() => gateway.resolveInteraction(id, { action: plan.permission, answers: {}, text: plan.text }, 'user'), 30);
@@ -337,22 +340,139 @@ async function run() {
 
   console.log('\n[2.7] VS Code Copilot / Cursor / Codex');
 
-  // VS Code（1.109+）：与 Claude Code 同格式（PascalCase + snake_case），
-  // 但没有 PermissionRequest → 审批走 PreToolUse
+  // VS Code：与 Claude Code 同格式，但只有 8 个事件（没有 PermissionRequest /
+  // Notification），审批挂在 PreToolUse；且它**忽略 matcher**，所以「只拦高风险
+  // 工具」必须在脚本里判断。工具名/入参也和 Claude Code 不一样：
+  // VS Code 是 run_in_terminal + camelCase，Claude harness 里才是 Bash + snake_case。
   plan = { permission: 'allow' };
   res = await runHook({
     hook_event_name: 'PreToolUse',
     session_id: `smoke-vscode-${process.pid}`,
     cwd: path.join(os.tmpdir(), 'vscode-proj'),
-    tool_name: 'runInTerminal',
-    tool_input: { command: 'npm run build' },
+    tool_name: 'run_in_terminal',            // 下划线命名，不是 runInTerminal
+    tool_input: { command: 'npm run build', cwd: '/tmp' },
     timestamp: new Date().toISOString(),
   }, ['--source', 'vscode']);
   out = parseOut(res.out);
-  ok('VS Code PreToolUse 允许 → permissionDecision=allow',
+  ok('VS Code PreToolUse（run_in_terminal）允许 → permissionDecision=allow',
     out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'allow', res);
   ok('VS Code 上下文 → 来源标为 vscode',
     lastPopup && lastPopup.context && lastPopup.context.agent === 'vscode', lastPopup && lastPopup.context);
+
+  // 非高风险工具（读文件）不该弹窗，也不该回决策：
+  // 回 allow 就等于替 VS Code 绕过它自己的审批设置
+  let popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'read_file',
+    tool_input: { filePath: 'src/index.ts' },   // VS Code 入参是 camelCase
+  }, ['--source', 'vscode']);
+  out = parseOut(res.out);
+  ok('VS Code 非高风险工具（read_file）→ 不弹窗、不回决策',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // 工具名归一化：Claude harness 在 VS Code 里跑时叫 Bash，也该被拦
+  plan = { permission: 'deny', text: '这条命令先不动' };
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'Bash',
+    tool_input: { command: 'rm -rf dist', description: '清理构建产物' },
+  }, ['--source', 'vscode']);
+  out = parseOut(res.out);
+  ok('VS Code 工具名归一化（Bash）也被识别为高风险',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput.permissionDecision === 'deny', res);
+
+  // camelCase 入参要能读出规则内容（Claude Code 那边是 file_path）
+  plan = { permission: 'deny', text: '这个文件先别删' };
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'delete_file',
+    tool_input: { filePath: 'dist/app.js' },
+  }, ['--source', 'vscode']);
+  ok('VS Code camelCase 入参（filePath）能读出规则内容',
+    lastPopup && lastPopup.permission && /dist\/app\.js/.test(lastPopup.permission.rule || ''),
+    lastPopup && lastPopup.permission);
+
+  // 「始终允许」在 VS Code 上没有 updatedPermissions 可回写 → 靠本地规则缓存落地。
+  // 命令串带上 pid，避免历史运行留下的规则影响本次断言。
+  const alwaysCmd = `npm run lint --fix #${process.pid}`;
+  plan = { permission: 'allow-always' };
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: alwaysCmd },
+  }, ['--source', 'vscode']);
+  out = parseOut(res.out);
+  const firstAllow = out && out.hookSpecificOutput.permissionDecision === 'allow';
+
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: alwaysCmd },
+  }, ['--source', 'vscode']);
+  out = parseOut(res.out);
+  ok('VS Code「始终允许」→ 本地规则生效，第二次不再弹窗',
+    firstAllow && popups.length === popupCount && out
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // 提问：VS Code 的 askQuestions 弹的是 QuickPick，答案不在入参里，
+  // 改 updatedInput 改不动用户选择 → 走 deny + 把答案写进原因/上下文
+  plan = { ask: 'submit', askOption: 0 };
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'vscode/askQuestions',
+    tool_input: {
+      questions: [{
+        header: '缓存', question: '用哪种缓存策略？', multiSelect: false,
+        options: [{ label: 'LRU', description: '内存可控' }, { label: 'TTL', description: '实现简单' }],
+      }],
+    },
+    tool_use_id: `vscode-ask-${process.pid}`,
+  }, ['--source', 'vscode']);
+  out = parseOut(res.out);
+  ok('VS Code 提问（vscode/askQuestions）→ deny + 答案进 reason/additionalContext',
+    out && out.hookSpecificOutput.permissionDecision === 'deny'
+      && /LRU/.test(out.hookSpecificOutput.permissionDecisionReason || '')
+      && /LRU/.test(out.hookSpecificOutput.additionalContext || ''), res);
+  ok('VS Code 提问弹窗带出选项',
+    lastPopup && lastPopup.questions && lastPopup.questions[0].options[0].label === 'LRU',
+    lastPopup && lastPopup.questions);
+
+  // 未决策（超时/关窗）：VS Code 若「不做决策」，就会按它自己的审批设置走，
+  // 可能被静默放行 → 显式回 ask，强制原生确认
+  holdInteraction = true;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-vscode-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `echo no-answer-${process.pid}` },
+  }, ['--source', 'vscode'], { POMODORO_TIMEOUT_S: '5' });
+  holdInteraction = false;
+  out = parseOut(res.out);
+  ok('VS Code 未决策 → permissionDecision=ask，绝不静默放行',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'ask', res);
+
+  // Stop 只上报，绝不回 decision:block（那会阻止收尾甚至把 agent 拖进自循环）
+  res = await runHook({
+    hook_event_name: 'Stop',
+    session_id: `smoke-vscode-${process.pid}`,
+    stop_hook_active: false,
+  }, ['--source', 'vscode']);
+  ok('VS Code Stop → 静默上报，不返回 decision:block', res.out.trim() === '', res);
+
+  // 新增事件要能被网关接受（写完就上报，不能 400）
+  r = await post('/api/event', { kind: 'pre-compact', source: 'vscode' });
+  ok('网关接受 pre-compact 事件', r && r.ok === true, r);
+  r = await post('/api/event', { kind: 'subagent-start', source: 'vscode' });
+  ok('网关接受 subagent-start 事件', r && r.ok === true, r);
 
   // Cursor：beforeShellExecution 拦截命令
   plan = { permission: 'deny', text: '这条命令先不动' };

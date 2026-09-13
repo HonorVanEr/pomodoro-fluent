@@ -389,17 +389,21 @@ const PomodoroApp = (() => {
       }, null, 2);
     }
     if (agent === 'vscode') {
-      // VS Code Copilot Agent hooks（1.109+）：与 Claude Code 同格式，
-      // 用户级放 ~/.copilot/hooks/*.json；没有 PermissionRequest，审批走 PreToolUse
+      // VS Code Copilot Agent hooks：与 Claude Code 同格式，用户级放 ~/.copilot/hooks/*.json。
+      // 只有 8 个事件（无 PermissionRequest / Notification），审批走 PreToolUse；
+      // VS Code 会忽略 matcher，只拦高风险工具的判断在 CLI 里做。
+      // timeout 单位是秒、默认只有 30 → 要等弹窗就必须显式调大。
       return JSON.stringify({
         version: 1,
         hooks: {
-          PreToolUse: [{ type: 'command', command: cmd('vscode'), timeoutSec: 600 }],
-          SessionStart: [{ type: 'command', command: cmd('vscode') }],
-          UserPromptSubmit: [{ type: 'command', command: cmd('vscode') }],
-          PostToolUse: [{ type: 'command', command: cmd('vscode') }],
-          SubagentStop: [{ type: 'command', command: cmd('vscode') }],
-          Stop: [{ type: 'command', command: cmd('vscode') }],
+          PreToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 600 }],
+          PostToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          SessionStart: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          UserPromptSubmit: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          SubagentStart: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          SubagentStop: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          PreCompact: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          Stop: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
         },
       }, null, 2);
     }

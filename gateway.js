@@ -361,9 +361,9 @@ function createGateway(deps) {
 
   // ---- agent 事件 → 计数 + 策略弹窗 ----
   const EVENT_KINDS = new Set([
-    'notification', 'ask', 'permission', 'stop', 'subagent-stop',
+    'notification', 'ask', 'permission', 'stop', 'subagent-start', 'subagent-stop',
     'tool-before', 'tool-after',
-    'session-start', 'session-end', 'prompt',
+    'session-start', 'session-end', 'pre-compact', 'prompt',
   ]);
 
   function handleEvent(ev) {
@@ -407,7 +407,8 @@ function createGateway(deps) {
         break;
 
       default:
-        // tool-before / subagent-stop / prompt：暂不计数不弹窗
+        // tool-before / subagent-start / subagent-stop / pre-compact / prompt：
+        // 只用于弹窗上下文与调试，不计数也不弹窗
         break;
     }
     emitActivity();

@@ -18,7 +18,7 @@ Codex notify ──────────┘
 |---|---|---|---|---|
 | ZCode | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.zcode/cli/config.json` |
 | Claude Code | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.claude/settings.json` |
-| VS Code Copilot | ✅ `askQuestions` | ⚠️ 挂在 `PreToolUse`（默认只拦高风险工具） | ✅ | `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json` |
+| VS Code Copilot | ✅ `vscode/askQuestions` | ⚠️ 挂在 `PreToolUse`（VS Code 无 `PermissionRequest`；默认只拦高风险工具） | ✅ `Stop` | `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json` |
 | Cursor | ✅ `preToolUse` + `updated_input` | ✅ `beforeShellExecution` / `preToolUse` / `beforeMCPExecution` | ✅ | `~/.cursor/hooks.json` 或 `.cursor/hooks.json` |
 | OpenCode | ✅ `question.asked` | ✅ `permission.ask` | ✅ | 插件 + `opencode.json` |
 | Codex CLI | ❌ 无提问回调 | ❌ 无权限回调（TUI 审批） | ✅ 回合结束通知 | `~/.codex/config.toml` 的 `notify` |
@@ -173,32 +173,94 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 > 交互模式下本 hook 默认仍走 `updatedInput.answers` 注入；若你的版本不认，原生提问 UI 会照常弹出，不会卡死。
 > 想改用「deny + 把答案写进原因」的社区方案，设 `POMODORO_ASK_MODE=deny`。
 
-## VS Code Copilot（1.109+，Agent hooks Preview）
+## VS Code Copilot（当前稳定版 1.137，Agent hooks Preview）
 
-好消息：**VS Code 的 hooks 与 Claude Code 同格式**（PascalCase 事件名 + snake_case 字段），所以适配层直接复用，不需要额外插件。
+> 版本基线：workspace hooks 更早就有了，**agent-scoped hooks 是 1.111（2026-03）** 加的，
+> 当前稳定版是 **1.137（2026-09-09）**。下面这些字段名/事件名都是按官方
+> [Agent hooks](https://code.visualstudio.com/docs/agent-customization/hooks) 与
+> [Hooks reference](https://code.visualstudio.com/docs/agents/reference/hooks-reference) 对齐的。
 
-- 配置位置：用户级 `~/.copilot/hooks/*.json`（`install --agent vscode` 会写这里），工作区级 `.github/hooks/*.json`；
-- VS Code 也会读 `.claude/settings.json` / `~/.claude/settings.json`，所以**已经为 Claude Code 配过的机器，VS Code 侧基本是免配的**；
-- 事件集是 8 个：`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` / `PreCompact` / `SubagentStart` / `SubagentStop` / `Stop`；
-- ⚠️ **没有 `PermissionRequest`**，审批只能挂在 `PreToolUse` 上。而 `PreToolUse` 对每个工具调用都会触发，全拦会变成弹窗轰炸，所以默认**只拦高风险工具**：
+好消息：**VS Code 的 hooks 与 Claude Code 同格式**（PascalCase 事件名 + 同形 `hookSpecificOutput`），
+所以适配层基本复用，不需要额外插件。
 
-  | 默认拦截 | `runInTerminal` `runCommands` `runNotebookCell` `runTests` `runTask` `Bash` `Shell` `terminal` `deleteFile` `renameFile` `createDirectory` `copyFiles` `moveFiles` `applyPatch` `editFiles` |
-  |---|---|
+- 配置位置：用户级 `~/.copilot/hooks/*.json`（`install --agent vscode` 会写这里），
+  工作区级 `.github/hooks/*.json`。加载范围可用 `chat.hookFilesLocations` 调；
+  如果 `~/.copilot/hooks` 没被加载，在设置里加一条 `"~/.copilot/hooks": true`。
+- 事件集只有 8 个：`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` /
+  `PreCompact` / `SubagentStart` / `SubagentStop` / `Stop`。
+  ⚠️ **没有 `PermissionRequest`，也没有 `Notification`** —— 审批只能挂 `PreToolUse`，
+  "任务完成通知"只能挂 `Stop`。
+- ⚠️ **VS Code 会忽略 matcher**（官方原话："Currently, VS Code ignores matcher values"），
+  所有 hook 在每次工具调用时都会跑。所以「只拦高风险工具」的判断做在 CLI 里，
+  而不是靠 `"matcher"` 字段 —— 写 matcher 是没用的。
+- ⚠️ **工具名和 Claude Code 完全不同**：VS Code 官方是 `run_in_terminal` / `create_file` /
+  `replace_string_in_file` 这类**下划线**命名，工具入参也是 **camelCase**（`tool_input.filePath`），
+  而 Claude Code 是 `Write` / `Bash` + `snake_case`（`tool_input.file_path`）。
+  CLI 会先把工具名归一化（去命名空间、去下划线、转小写）再匹配，所以
+  `run_in_terminal` 与 `runInTerminal` 等价，Claude harness 下叫 `Bash` 也一样拦得住。
 
-  用 `POMODORO_VSCODE_APPROVE_TOOLS` 改（正则）：`.*` = 全拦，空串 = 全不拦。
-- 提问工具（`askQuestions` / `vscode_askQuestions`）走 `PreToolUse`，答案经 `updatedInput.answers` 注入。
-- 组织若用企业策略禁用了 hooks，需要找管理员放开；`Developer: Show Agent Debug Logs` 里能看到 hook 是否执行。
+默认只拦这些高风险工具（归一化后匹配）：
+
+| 类别 | 工具 |
+|---|---|
+| 执行命令 / 终端 | `run_in_terminal` `runTerminalCommand` `runCommands` `runNotebookCell` `runTask` `runTests` `Bash` `Shell` |
+| 删除 / 移动类破坏性文件操作 | `delete_file` `rename_file` `move_files` `copy_files` `create_directory` `applyPatch` |
+
+用 `POMODORO_VSCODE_APPROVE_TOOLS` 改（正则，匹配的是归一化后的名字）：`.*` = 每个工具都问，空串 = 关闭审批。
+**普通文件编辑不拦**——那是 agent 的日常动作，全拦会变成弹窗轰炸；VS Code 自己的
+`chat.tools.edits.autoApprove` 管这件事。
+
+返回值与语义（`hookSpecificOutput`）：
+
+| 场景 | 返回 | 说明 |
+|---|---|---|
+| 你点了「允许」 | `permissionDecision: "allow"` | 放行 |
+| 你点了「拒绝」 | `permissionDecision: "deny"` + `permissionDecisionReason` | 阻止这次工具调用 |
+| **超时 / 关窗** | `permissionDecision: "ask"` | **强制走 VS Code 原生确认**。若这里「不返回决策」，VS Code 就按它自己的审批设置走 —— 你可能已经把终端设成免确认，等于被静默放行 |
+| 非高风险工具 | 不返回决策 | 交回 VS Code 正常流程，不越权 auto-approve |
+| `Stop` | 什么都不返回 | **绝不能返回 `decision: "block"`**，那会阻止 agent 收尾（VS Code 的 `stop_hook_active` 就是防这个自循环的） |
+
+**提问弹窗（`vscode/askQuestions`）**：与 Claude Code 不同，VS Code 的提问工具弹的是 QuickPick，
+**答案不在入参里**，所以 `updatedInput` 改不动用户选择（它只换问题本身）。这里默认走
+**`deny` + 把答案写进 `permissionDecisionReason` 与 `additionalContext`**——后者才是"给模型看"的字段，
+模型据此继续。想换回注入式可以设 `POMODORO_ASK_MODE=answers`（但 VS Code 下不生效）。
+
+**「始终允许」**：VS Code 的 `PreToolUse` 输出里**没有 `updatedPermissions`**，
+规则回写不到宿主去。所以对 VS Code（以及同样不支持回写的 Cursor），
+用户点了「始终允许」会记进本地规则缓存
+（`%TEMP%\pomodoro-hook-cache\always-allow.json`，默认 30 天），
+下次同工具同命令直接放行、不再弹窗。关掉：`POMODORO_LOCAL_ALWAYS_ALLOW=0`。
+
+**超时要留够**：VS Code 的 hook 默认 `timeout` 只有 **30 秒**（单位是秒），
+而我们要等你点弹窗 —— 所以 `install --agent vscode` 会把 `PreToolUse` 的
+`timeout` 显式设成 `600`。手写配置时别漏了这个字段，否则 30 秒后宿主直接掐掉 hook，
+弹窗白弹。
+
+**已在 Claude Code 配过的机器**：VS Code 默认也会读 `~/.claude/settings.json`，
+同一次工具调用会被跑两遍（等于两套 hooks 叠加）。你已经在
+`.claude/settings.json` 里配了 `PreToolUse` 且带 matcher —— VS Code 忽略 matcher，
+会变成每个工具都触发，所以**建议二选一**：要么只用 Claude Code 那份，要么在 VS Code 设置里关掉：
+
+```jsonc
+"chat.hookFilesLocations": { "~/.claude/settings.json": false }
+```
+
+**其它必知**：组织可能用企业策略禁用 hooks（需找管理员）；退出码 `2` = 阻断并把
+stderr 给模型看，所以 CLI 恒以 0 退出；`Developer: Show Agent Debug Logs` 能看到
+hook 是否执行、以及 `Load Hooks` 日志里各 hook 是从哪个文件加载的。
 
 ```json
 {
   "version": 1,
   "hooks": {
-    "PreToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeoutSec": 600 }],
-    "SessionStart": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode" }],
-    "UserPromptSubmit": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode" }],
-    "PostToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode" }],
-    "SubagentStop": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode" }],
-    "Stop": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode" }]
+    "PreToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 600 }],
+    "PostToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
+    "SessionStart": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
+    "UserPromptSubmit": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
+    "SubagentStart": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
+    "SubagentStop": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
+    "PreCompact": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
+    "Stop": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }]
   }
 }
 ```
@@ -220,6 +282,15 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 | `sessionStart` / `sessionEnd` / `subagentStart` / `subagentStop` / `preCompact` | 会话与子 agent 计数 | 不回决策 |
 
 超时或被关窗时返回 `permission: "ask"`，交回 Cursor 原生确认（Cursor 原生支持 ask，比硬拒更友好）；只有你**明确点了拒绝**才会 deny。
+
+两个细节（避免踩坑）：
+
+- `preToolUse` 上的 `ask` **官方接受但不强制**——Cursor 只在 `beforeShellExecution` / `beforeMCPExecution`
+  上完整兑现 `allow / deny / ask` 三态。所以 `preToolUse` 上的 `ask` 等价于「不做决策」，
+  会落回 Cursor 自己的审批流程；结果仍然是**不会静默放行**，只是提示语由 Cursor 出。
+- 「始终允许」：Cursor 的 `preToolUse` 不能回写规则，所以和 VS Code 一样记进本地规则缓存；
+  另外 `POMODORO_PERMISSION=0` 关闭接管时返回 `{}`（不做决策），**不会**返回 `permission: "allow"`——
+  以前那样写等于替用户强制放行，属于越权。
 
 ```json
 {
@@ -344,24 +415,25 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 | `ask` | 提问（无交互降级） | 打断计数 + 弹通知 |
 | `notification` | 等待用户输入 | 打断计数 + 弹通知 |
 | `stop` | 主 agent 回合结束 | 计数；专注中且无未决交互则弹「休息建议」 |
-| `subagent-stop` | 子 agent 结束 | 仅计数 |
+| `subagent-start` / `subagent-stop` | 子 agent 起止 | 仅记上下文（子 agent 名称） |
 | `tool-after` | 工具调用完成 | 工具调用计数 |
-| `tool-before` / `prompt` | 工具调用前 / 用户提交提示词 | 预留 |
+| `tool-before` / `prompt` / `pre-compact` | 工具调用前 / 用户提交提示词 / 上下文压缩前 | 预留（只记上下文） |
 | `session-start` / `session-end` | 会话开始/结束 | 会话计数 |
 
 ## 环境变量
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `POMODORO_SOURCE` | 自动 | `zcode` / `claude-code` / `opencode`（install 生成的命令会自动带 `--source`） |
-| `POMODORO_ASK` | 1 | 是否接管 `AskUserQuestion` |
-| `POMODORO_PERMISSION` | 1 | 是否接管 `PermissionRequest` |
+| `POMODORO_SOURCE` | 自动 | `zcode` / `claude-code` / `opencode` / `vscode` / `cursor` / `codex` / `qwen`（install 生成的命令会自动带 `--source`） |
+| `POMODORO_ASK` | 1 | 是否接管 `AskUserQuestion` / `askQuestions` |
+| `POMODORO_PERMISSION` | 1 | 是否接管权限请求 |
 | `POMODORO_CONFIRM_PRETOOL` | 0 | 1 = 普通 PreToolUse 也弹双向确认（建议只对 `Bash` 这类高风险工具开） |
-| `POMODORO_VSCODE_APPROVE_TOOLS` | 高风险工具正则 | VS Code 下走 `PreToolUse` 审批的工具范围（`.*` 全拦，空串关闭） |
+| `POMODORO_VSCODE_APPROVE_TOOLS` | 高风险工具正则 | VS Code 下走 `PreToolUse` 审批的工具范围，匹配**归一化后**的工具名（`.*` 全拦，空串关闭） |
+| `POMODORO_LOCAL_ALWAYS_ALLOW` | 1 | 0 关闭本地「始终允许」规则缓存（VS Code / Cursor 不支持规则回写，靠它落地） |
 | `POMODORO_ALWAYS_ALLOW` | 1 | 0 隐藏「始终允许」按钮 |
 | `POMODORO_PERMISSION_DEST` | projectSettings | 「始终允许」写进哪份配置 |
-| `POMODORO_TIMEOUT_S` | 240 | 弹窗等待秒数（上限 590；hook 配置的 timeout 要 ≥ 它） |
-| `POMODORO_ASK_MODE` | answers | `deny` = 用「拒绝 + 答案写进原因」的方式回传提问答案 |
+| `POMODORO_TIMEOUT_S` | 240 | 弹窗等待秒数（上限 590；hook 配置的 timeout 要 ≥ 它，VS Code 的默认 timeout 只有 30 秒，务必显式调大） |
+| `POMODORO_ASK_MODE` | answers（VS Code 为 deny） | `deny` = 用「拒绝 + 答案写进原因」的方式回传提问答案 |
 | `POMODORO_GATEWAY_FILE` | 自动发现 | 指定 gateway.json 路径 |
 | `POMODORO_PORT` / `POMODORO_TOKEN` | 自动发现 | 直接指定网关端口与 token |
 
