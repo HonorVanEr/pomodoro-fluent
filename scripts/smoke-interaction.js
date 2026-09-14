@@ -113,6 +113,20 @@ function getStatus() {
   });
 }
 
+// ---- 宿主配置 fixture ----
+// hook 会去读本机真实的 VS Code / Trae 设置来决定「跟不跟随自动允许」。
+// 为了让断言不受本机环境影响，默认指到临时 fixture：VS Code 空配置（无自动批准）、
+// Trae = 手动运行（宿主会问 ⇒ 该我们拦）。要测跟随行为时再逐例覆盖。
+const HOST_CFG_DIR = path.join(USER_DATA, 'hostcfg');
+fs.mkdirSync(HOST_CFG_DIR, { recursive: true });
+function writeHostCfg(name, obj) {
+  const file = path.join(HOST_CFG_DIR, `${name}.json`);
+  fs.writeFileSync(file, typeof obj === 'string' ? obj : JSON.stringify(obj, null, 2));
+  return file;
+}
+const VSCODE_SETTINGS = writeHostCfg('vscode', {});
+const TRAE_SETTINGS = writeHostCfg('trae', { 'AI.toolcall.v2.ide.command.mode': 'alwaysAsk' });
+
 function runHook(stdinPayload, extraArgs = [], env = {}) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [HOOK, ...extraArgs], {
@@ -122,6 +136,8 @@ function runHook(stdinPayload, extraArgs = [], env = {}) {
         POMODORO_PORT: String(gateway.getPort()),
         POMODORO_TOKEN: token(),
         POMODORO_TIMEOUT_S: '20',
+        POMODORO_VSCODE_SETTINGS: VSCODE_SETTINGS,
+        POMODORO_TRAE_SETTINGS: TRAE_SETTINGS,
         ...env,
       },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -453,7 +469,7 @@ async function run() {
     hook_event_name: 'PreToolUse',
     session_id: `smoke-vscode-${process.pid}`,
     tool_name: 'run_in_terminal',
-    tool_input: { command: `echo no-answer-${process.pid}` },
+    tool_input: { command: `mkdir smoke-no-answer-${process.pid}` },
   }, ['--source', 'vscode'], { POMODORO_TIMEOUT_S: '5' });
   holdInteraction = false;
   out = parseOut(res.out);
@@ -579,6 +595,192 @@ async function run() {
   ok('Trae 来源自动识别（llm_tool_name/workspace_roots）',
     out && out.hookSpecificOutput && out.hookSpecificOutput.permissionDecision === 'allow'
       && lastPopup && lastPopup.context && lastPopup.context.agent === 'trae', res);
+
+  console.log('\n[2.9] 跟随宿主的自动允许（宿主已放行的调用不再弹窗）');
+
+  // 宿主没有可读的自动批准配置 → 仍按默认高风险名单拦（保守，不因为「读不到」就放行）
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `npm run host-${process.pid}` },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: VSCODE_SETTINGS });
+  out = parseOut(res.out);
+  ok('VS Code 无可读自动批准配置 → 仍按默认名单拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // 宿主全局自动批准 → 不弹窗、不回决策（用户显式选了「全部放行」，就该尊重）
+  const vsGlobal = writeHostCfg('vscode-global', { 'chat.tools.global.autoApprove': true });
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: 'rm -rf dist' },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: vsGlobal });
+  out = parseOut(res.out);
+  ok('VS Code 全局自动批准（chat.tools.global.autoApprove）→ 不弹窗、不回决策',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // 只读命令：宿主内置规则本来就会放行 → 不拦（这是「误报」的主要来源）
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: 'ls -la && git status' },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: VSCODE_SETTINGS });
+  out = parseOut(res.out);
+  ok('VS Code 只读命令（ls / git status）→ 不弹窗、不回决策',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // 重定向到文件就不算只读（会写盘）→ 照拦
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `echo hi > smoke-${process.pid}.txt` },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: VSCODE_SETTINGS });
+  out = parseOut(res.out);
+  ok('只读命令带重定向（echo > file）→ 不算只读，仍然拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // 逐条规则：命中 false → 宿主会问 → 拦；命中 true → 宿主放行 → 不拦
+  const vsRules = writeHostCfg('vscode-rules', {
+    'chat.tools.terminal.autoApprove': { npm: true, rm: false },
+  });
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `npm run build-${process.pid} && rm -rf dist` },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: vsRules });
+  out = parseOut(res.out);
+  ok('VS Code 复合命令命中宿主 false 规则（rm）→ 仍然拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `npm run build-${process.pid}` },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: vsRules });
+  out = parseOut(res.out);
+  ok('VS Code 命中宿主 true 规则（npm）→ 不弹窗、不回决策',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // tool 级排除：chat.tools.eligibleForAutoApproval=false → 宿主强制手动，一句都不放过
+  const vsEligible = writeHostCfg('vscode-eligible', {
+    'chat.tools.terminal.autoApprove': { npm: true },
+    'chat.tools.eligibleForAutoApproval': { runInTerminal: false },
+  });
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `npm run build-${process.pid}` },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: vsEligible });
+  out = parseOut(res.out);
+  ok('VS Code eligibleForAutoApproval=false → 宿主强制手动，优先于 true 规则',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // 工作区 .vscode/settings.json 优先于用户级
+  const wsRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'pomodoro-ws-'));
+  fs.mkdirSync(path.join(wsRoot, '.vscode'), { recursive: true });
+  fs.writeFileSync(path.join(wsRoot, '.vscode', 'settings.json'),
+    JSON.stringify({ 'chat.tools.terminal.autoApprove': { mkdir: true } }));
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    cwd: wsRoot,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `mkdir smoke-${process.pid}` },
+  }, ['--source', 'vscode'], { POMODORO_VSCODE_SETTINGS: VSCODE_SETTINGS });
+  out = parseOut(res.out);
+  ok('工作区 .vscode/settings.json 优先于用户级（mkdir:true）→ 不拦',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // 显式指定拦截名单 → 不再跟随宿主（要的就是「我说了算」）
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: `npm run build-${process.pid}` },
+  }, ['--source', 'vscode'],
+  { POMODORO_VSCODE_SETTINGS: vsRules, POMODORO_PRETOOL_APPROVE_TOOLS: 'runinterminal' });
+  out = parseOut(res.out);
+  ok('显式 POMODORO_PRETOOL_APPROVE_TOOLS → 覆盖宿主判定，仍然拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // Trae：手动运行 = 宿主会问 → 拦
+  const traeAsk = writeHostCfg('trae-ask', { 'AI.toolcall.v2.ide.command.mode': 'alwaysAsk' });
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-trae-${process.pid}`,
+    tool_name: 'RunCommand',
+    tool_input: { command: `npm run build-${process.pid}` },
+  }, ['--source', 'trae'], { POMODORO_TRAE_SETTINGS: traeAsk });
+  out = parseOut(res.out);
+  ok('Trae 手动运行（alwaysAsk）→ 仍然拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // Trae：沙箱运行（whitelist）/ 自动运行（alwaysRun）= 宿主自己执行 → 不拦
+  const traeAuto = writeHostCfg('trae-auto', { 'AI.toolcall.v2.ide.command.mode': 'whitelist' });
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-trae-${process.pid}`,
+    tool_name: 'RunCommand',
+    tool_input: { command: `npm run build-${process.pid}` },
+  }, ['--source', 'trae'], { POMODORO_TRAE_SETTINGS: traeAuto });
+  out = parseOut(res.out);
+  ok('Trae 沙箱运行（whitelist）→ 不弹窗、不回决策',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // Trae：黑名单命中 → 宿主要求确认 → 拦
+  const traeDeny = writeHostCfg('trae-deny', {
+    'AI.toolcall.v2.ide.command.mode': 'blacklist',
+    'AI.toolcall.v2.command.denyList': ['rm', 'del'],
+  });
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-trae-${process.pid}`,
+    tool_name: 'RunCommand',
+    tool_input: { command: 'rm -rf dist' },
+  }, ['--source', 'trae'], { POMODORO_TRAE_SETTINGS: traeDeny });
+  out = parseOut(res.out);
+  ok('Trae 黑名单命中（rm）→ 仍然拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
+
+  // 关掉跟随 → 回到「一律按名单拦」
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    session_id: `smoke-host-${process.pid}`,
+    tool_name: 'run_in_terminal',
+    tool_input: { command: 'ls -la' },
+  }, ['--source', 'vscode'],
+  { POMODORO_VSCODE_SETTINGS: vsGlobal, POMODORO_RESPECT_HOST_AUTO: '0' });
+  out = parseOut(res.out);
+  ok('POMODORO_RESPECT_HOST_AUTO=0 → 关闭跟随，只读命令也拦',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.permissionDecision === 'allow', res);
 
   // Cursor：beforeShellExecution 拦截命令
   plan = { permission: 'deny', text: '这条命令先不动' };
