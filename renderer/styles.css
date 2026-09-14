@@ -198,6 +198,27 @@ html, body {
   background: var(--accent-soft);
   color: var(--accent-a);
 }
+/* Agent 网关开关：右上角常驻，运行时点亮并亮起状态点 */
+.win-btn-gateway { position: relative; }
+.win-btn-gateway::after {
+  content: '';
+  position: absolute;
+  top: 5px;
+  right: 6px;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.22);
+  transition: background 0.15s, box-shadow 0.15s;
+}
+.win-btn-gateway.gateway-on {
+  color: #38bdb2;
+  background: rgba(56, 189, 178, 0.16);
+}
+.win-btn-gateway.gateway-on::after {
+  background: #38bdb2;
+  box-shadow: 0 0 6px rgba(56, 189, 178, 0.9);
+}
 .win-btn-close:hover { background: #e81123; color: #fff; }
 
 /* ---------- 阶段 Tab ---------- */

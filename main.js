@@ -292,6 +292,15 @@ function showNotify(payload) {
 
   // 如果已经有通知窗口，先关掉旧的
   if (notifyWindow && !notifyWindow.isDestroyed()) {
+    // 旧窗如果是在等用户决策的交互窗（权限/提问），先按 dismissed 收尾：
+    // 否则窗口被顶掉后，hook 那边的长轮询只能干等到超时才拿到兜底值
+    let prev = null;
+    for (const p of popupPayloads.values()) {
+      if (p && p.interactive) { prev = p; break; }
+    }
+    if (prev && gateway) {
+      gateway.resolveInteraction(prev.id, { action: null, answers: {}, text: '' }, 'dismissed');
+    }
     notifyWindow.close();
     notifyWindow = null;
   }
@@ -397,21 +406,15 @@ function rebuildTrayMenu(state) {
     { type: 'separator' },
     {
       label: running ? '暂停' : '开始',
-      click: () => {
-        if (mainWindow) mainWindow.webContents.send('tray:command', 'toggle');
-      },
+      click: () => sendRendererCommand('toggle'),
     },
     {
       label: '重置',
-      click: () => {
-        if (mainWindow) mainWindow.webContents.send('tray:command', 'reset');
-      },
+      click: () => sendRendererCommand('reset'),
     },
     {
       label: '跳到下一阶段',
-      click: () => {
-        if (mainWindow) mainWindow.webContents.send('tray:command', 'skip');
-      },
+      click: () => sendRendererCommand('skip'),
     },
     { type: 'separator' },
     {
@@ -460,6 +463,11 @@ function toggleMainWindow() {
     mainWindow.show();
     mainWindow.focus();
   }
+}
+
+// 把定时器命令转发给渲染进程（托盘菜单 / Agent 网关 / 弹窗按钮共用）
+function sendRendererCommand(cmd) {
+  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tray:command', cmd);
 }
 
 // ---------------------------------------------------------------------------
@@ -931,9 +939,7 @@ function startGateway() {
   if (gateway) return;
   gateway = createGateway({
     showPopup: showNotify,
-    sendTimerCommand: (cmd) => {
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('tray:command', cmd);
-    },
+    sendTimerCommand: sendRendererCommand,
     onActivity: (a) => {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('state:agent-activity', a);
     },
@@ -976,10 +982,12 @@ ipcMain.on('interaction:respond', (e, payload) => {
   const resolved = gateway
     ? gateway.resolveInteraction(p.id, { action: p.action, answers: p.answers || {}, text: p.text || '' }, 'user')
     : false;
-  if (resolved) {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (win && !win.isDestroyed()) win.close();
-  }
+  // 非网关弹窗（阶段结束提醒等）也带按钮：点「进入下一阶段」直接开跑下一阶段
+  if (!resolved && p.action === 'start-next') sendRendererCommand('start-next');
+  // 由弹窗页发出的回应一律收起该弹窗：网关那边可能已经 resolve（主进程关），
+  // 本地弹窗（没有挂起交互）也得关，否则只能等自动关闭
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (win && !win.isDestroyed()) win.close();
 });
 
 // 旧接口兼容：只有 action 的确认
