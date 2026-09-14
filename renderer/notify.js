@@ -79,13 +79,58 @@ const state = {
   submitted: false,
 };
 
-function autoResize() {
+// 首帧的字体度量还没落位（Chromium 会在 ~150ms 内继续微调行高），那时量出来的
+// 高度会矮 10px 上下。窗口跟着偏矮，而卡片是 height:100% + overflow:hidden，
+// 于是被裁掉的正好是底部内边距 —— 表现就是进度条贴着按钮。
+// 所以首次上报延后到布局稳定，之后再补量校准。
+const RESIZE_FIRST_DELAY_MS = 180;
+let lastSentSize = '';
+
+// 临时把 height:100% 换成 auto 量真实内容高度（不实际改动最终布局）
+function measureCardHeight() {
   const card = el('notify-card');
-  const width = state.kind === 'ask' ? 460 : (state.kind === 'permission' ? 432 : 400);
+  const keep = card.style.height;
   card.style.height = 'auto';
   const h = Math.ceil(card.getBoundingClientRect().height) + 2;
-  card.style.height = '';
-  if (api && api.resizeNotify) api.resizeNotify(width, h);
+  card.style.height = keep;
+  return h;
+}
+
+function autoResize() {
+  if (!api || !api.resizeNotify) return;
+  const width = state.kind === 'ask' ? 460 : (state.kind === 'permission' ? 432 : 400);
+  const h = measureCardHeight();
+  const key = `${width}x${h}`;
+  if (key === lastSentSize) return;   // 尺寸没变就不重复设置，免得弹窗抖
+  lastSentSize = key;
+  api.resizeNotify(width, h);
+}
+
+// 内容后续长高（字体落位、换行变化、详情区出现滚动条…）也要跟着重设窗口
+function watchContentResize() {
+  if (typeof ResizeObserver !== 'function') return;
+  const ro = new ResizeObserver(() => autoResize());
+  [document.querySelector('.notify-body'), el('notifyContext'), el('notifyForm'), el('notifyActions')]
+    .filter(Boolean)
+    .forEach((node) => ro.observe(node));
+}
+
+function scheduleAutoResize() {
+  // armed 之前不量：ResizeObserver 的首次回调会在 observe() 后立刻触发，
+  // 抢在布局稳定前把那个矮了 10px 的高度报出去，白白多跳一次窗口。
+  let armed = false;
+  const pass = () => {
+    if (!armed) {
+      armed = true;
+      watchContentResize();
+    }
+    autoResize();
+  };
+  setTimeout(pass, RESIZE_FIRST_DELAY_MS);
+  setTimeout(pass, RESIZE_FIRST_DELAY_MS + 260);
+  if (document.fonts && document.fonts.ready) {
+    document.fonts.ready.then(() => { if (armed) autoResize(); }).catch(() => {});
+  }
 }
 
 function respond(result) {
@@ -359,8 +404,12 @@ function render(payload) {
   card.dataset.flavor = state.flavor;
 
   el('notifyTitle').textContent = p.title || '时间到';
-  el('notifyMessage').textContent = p.message || '';
-  el('notifySub').textContent = p.sub || '';
+  const msgEl = el('notifyMessage');
+  msgEl.textContent = p.message || '';
+  msgEl.hidden = !msgEl.textContent;      // 空行会把标题与正文之间的间距顶开
+  const subEl = el('notifySub');
+  subEl.textContent = p.sub || '';
+  subEl.hidden = !subEl.textContent;
 
   const detail = el('notifyDetail');
   if (p.detail) {
@@ -397,6 +446,8 @@ function render(payload) {
   } else {
     agentBadge.hidden = true;
   }
+  // 徽标全空时整行收掉，别在标题上方留一条死白
+  el('notifyHead').hidden = kindBadge.hidden && srcBadge.hidden && agentBadge.hidden;
 
   // 任务行：这个会话在做什么（来自 UserPromptSubmit 的提示词）
   const taskEl = el('notifyTask');
@@ -428,8 +479,8 @@ function render(payload) {
   // 走完倒计时自行关闭（网关侧会同时按 timeout 兜底）
   setTimeout(() => { if (!state.submitted) dismiss(); }, durationMs);
 
-  // 渲染完成后把真实高度回传给主进程
-  requestAnimationFrame(() => autoResize());
+  // 渲染完成后把真实高度回传给主进程（延后到布局稳定，见 scheduleAutoResize）
+  scheduleAutoResize();
 }
 
 function bindGlobal() {

@@ -12,20 +12,24 @@
     <div class="glass-blob blob-b"></div>
 
     <div class="notify-body">
-      <div class="notify-icon-wrap">
-        <div class="notify-icon" id="notifyIcon">
-          <!-- inline SVG injected -->
-        </div>
-        <div class="icon-ring" id="iconRing"></div>
-      </div>
-
       <div class="notify-content">
-        <div class="notify-head">
+        <div class="notify-head" id="notifyHead">
           <span class="notify-kind" id="notifyKind">通知</span>
           <span class="notify-source" id="notifySource" hidden></span>
           <span class="notify-agent" id="notifyAgent" hidden></span>
         </div>
-        <div class="notify-title" id="notifyTitle">时间到</div>
+
+        <!-- 图标不再独占左栏，缩到标题行左侧，正文拿满整宽 -->
+        <div class="notify-titlerow">
+          <div class="notify-icon-wrap">
+            <div class="notify-icon" id="notifyIcon">
+              <!-- inline SVG injected -->
+            </div>
+            <div class="icon-ring" id="iconRing"></div>
+          </div>
+          <div class="notify-title" id="notifyTitle">时间到</div>
+        </div>
+
         <div class="notify-message" id="notifyMessage"></div>
         <div class="notify-task" id="notifyTask" hidden></div>
         <pre class="notify-detail" id="notifyDetail" hidden></pre>
