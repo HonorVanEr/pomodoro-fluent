@@ -136,18 +136,23 @@ html, body {
 /* 高度随内容自适应：主进程按弹窗页实测高度重设窗口 */
 .notify-body {
   position: relative;
+  padding: 18px 20px 15px;
+}
+
+/* 图标与标题同一行：图标缩到 28px 贴左，标题占满剩余宽度 */
+.notify-titlerow {
   display: flex;
   align-items: center;
-  gap: 16px;
-  padding: 22px 20px 16px;
+  gap: 9px;
+  min-width: 0;
 }
 
 /* ---------- 图标 ---------- */
 .notify-icon-wrap {
   position: relative;
-  width: 56px;
-  height: 56px;
-  flex: 0 0 56px;
+  width: 28px;
+  height: 28px;
+  flex: 0 0 28px;
 }
 .notify-icon {
   position: absolute;
@@ -155,12 +160,12 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: center;
-  border-radius: 18px;
+  border-radius: 9px;
   background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
-  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.3), inset 0 1px 0 rgba(255,255,255,0.35);
+  box-shadow: 0 3px 9px rgba(0, 0, 0, 0.26), inset 0 1px 0 rgba(255,255,255,0.32);
   animation: iconPop 0.5s cubic-bezier(0.34, 1.56, 0.64, 1);
 }
-.notify-icon svg { width: 28px; height: 28px; }
+.notify-icon svg { width: 16px; height: 16px; }
 
 @keyframes iconPop {
   0% { transform: scale(0.4) rotate(-12deg); }
@@ -168,24 +173,26 @@ html, body {
   100% { transform: scale(1) rotate(0); }
 }
 
+/* 小尺寸下光环收窄，避免喧宾夺主 */
 .icon-ring {
   position: absolute;
-  inset: -5px;
-  border-radius: 22px;
-  border: 2px solid transparent;
+  inset: -3px;
+  border-radius: 12px;
+  border: 1.5px solid transparent;
   border-top-color: var(--accent-a);
   border-right-color: var(--accent-b);
-  opacity: 0.7;
+  opacity: 0.55;
   animation: ringSpin 3s linear infinite;
 }
 @keyframes ringSpin { to { transform: rotate(360deg); } }
 
 /* ---------- 文字 ---------- */
 .notify-content {
-  flex: 1;
   min-width: 0;
 }
 .notify-title {
+  flex: 1;
+  min-width: 0;
   font-size: 18px;
   font-weight: 600;
   letter-spacing: 0.2px;
@@ -212,7 +219,7 @@ html, body {
   display: flex;
   align-items: center;
   gap: 6px;
-  margin-bottom: 3px;
+  margin-bottom: 6px;
 }
 .notify-kind,
 .notify-source {
@@ -329,20 +336,50 @@ html, body {
   word-break: break-all;
 }
 
+/* ---------- 滚动条：细轨 + 低对比拇指，悬停才提亮 ---------- */
+/* ::-webkit-scrollbar 会整体接管 Win 经典滚动条，顺带干掉占宽的轨道与箭头 */
+.notify-detail::-webkit-scrollbar,
+.notify-form::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.notify-detail::-webkit-scrollbar-track,
+.notify-form::-webkit-scrollbar-track,
+.notify-detail::-webkit-scrollbar-corner,
+.notify-form::-webkit-scrollbar-corner {
+  background: transparent;
+}
+.notify-detail::-webkit-scrollbar-thumb,
+.notify-form::-webkit-scrollbar-thumb {
+  /* 透明描边 + padding-box 裁剪：8px 槽里只露 4px 圆头拇指，视觉更细 */
+  border: 2px solid transparent;
+  border-radius: 8px;
+  background-color: rgba(255, 255, 255, 0.14);
+  background-clip: padding-box;
+}
+.notify-detail::-webkit-scrollbar-thumb:hover,
+.notify-form::-webkit-scrollbar-thumb:hover {
+  background-color: rgba(255, 255, 255, 0.3);
+}
+.notify-detail::-webkit-scrollbar-thumb:active,
+.notify-form::-webkit-scrollbar-thumb:active {
+  background-color: rgba(255, 255, 255, 0.42);
+}
+.notify-detail::-webkit-scrollbar-button,
+.notify-form::-webkit-scrollbar-button {
+  display: none;
+  width: 0;
+  height: 0;
+}
+
 /* ---------- 交互表单（提问 / 权限备注） ---------- */
 .notify-form {
   position: relative;
-  padding: 0 20px 4px;
+  padding: 0 20px 6px;
   max-height: 340px;
   overflow-y: auto;
   overscroll-behavior: contain;
 }
-.notify-form::-webkit-scrollbar { width: 6px; }
-.notify-form::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.16);
-  border-radius: 3px;
-}
-.notify-form::-webkit-scrollbar-track { background: transparent; }
 
 .q-block {
   padding: 8px 0 10px;
@@ -456,7 +493,8 @@ html, body {
   position: relative;
   display: flex;
   gap: 8px;
-  padding: 8px 20px 16px;
+  /* 底部留白要压过绝对定位的 4px 进度条，否则进度条贴着按钮 */
+  padding: 10px 20px 24px;
 }
 .notify-action {
   flex: 1;
