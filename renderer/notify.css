@@ -88,11 +88,25 @@ html, body {
   --accent-c: #74b9ff;
 }
 
-/* agent 事件（Claude Code / OpenCode 等）紫色系 */
-.notify-card[data-type="agent"] {
+/* agent 事件（ZCode / Claude Code / OpenCode 等）紫色系 */
+.notify-card[data-flavor="agent"] {
   --accent-a: #8b7cf6;
   --accent-b: #6d5df0;
   --accent-c: #b28cf5;
+}
+
+/* 提问：蓝紫（需要你选择/输入） */
+.notify-card[data-flavor="ask"] {
+  --accent-a: #5b8cff;
+  --accent-b: #8b7cf6;
+  --accent-c: #74b9ff;
+}
+
+/* 权限：琥珀（需要你放行） */
+.notify-card[data-flavor="permission"] {
+  --accent-a: #ffb454;
+  --accent-b: #ff8f4d;
+  --accent-c: #ffd08a;
 }
 
 /* ---------- 玻璃光斑 ---------- */
@@ -119,13 +133,13 @@ html, body {
 }
 
 /* ---------- 主体布局 ---------- */
+/* 高度随内容自适应：主进程按弹窗页实测高度重设窗口 */
 .notify-body {
   position: relative;
   display: flex;
   align-items: center;
   gap: 16px;
   padding: 22px 20px 16px;
-  height: calc(100% - 4px);
 }
 
 /* ---------- 图标 ---------- */
@@ -190,15 +204,259 @@ html, body {
   opacity: 0.8;
 }
 
-/* ---------- 确认模式：按钮行 ---------- */
-.notify-card[data-mode="confirm"] .notify-body {
-  height: calc(100% - 58px);
+/* 让 hidden 属性压过下面的 display 规则（作者样式会盖掉 UA 的 [hidden]） */
+[hidden] { display: none !important; }
+
+/* ---------- 头部徽标（提问 / 权限 / 来源） ---------- */
+.notify-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 3px;
 }
+.notify-kind,
+.notify-source {
+  font-size: 10.5px;
+  letter-spacing: 0.4px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+}
+.notify-kind {
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+  font-weight: 600;
+}
+.notify-source {
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+/* 子 agent（如 code-reviewer） */
+.notify-agent {
+  font-size: 10.5px;
+  letter-spacing: 0.3px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  white-space: nowrap;
+  color: var(--accent-a);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid currentColor;
+  max-width: 140px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 任务行（这个会话在做什么） ---------- */
+.notify-task {
+  margin-top: 6px;
+  padding-left: 8px;
+  border-left: 2px solid var(--accent-a);
+  font-size: 12px;
+  line-height: 1.45;
+  color: var(--text-dim);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+/* ---------- 上下文条（工具 / 项目 / 会话） ---------- */
+.notify-context {
+  position: relative;
+  padding: 8px 20px 0;
+}
+.ctx-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.ctx-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+  max-width: 100%;
+  padding: 2px 7px;
+  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid rgba(255, 255, 255, 0.1);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ctx-key { opacity: 0.6; }
+.ctx-val {
+  color: var(--text);
+  font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.ctx-sep { opacity: 0.4; }
+.ctx-detail {
+  margin-top: 6px;
+  padding: 6px 9px;
+  border-radius: 7px;
+  background: rgba(0, 0, 0, 0.22);
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--text-dim);
+  font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 11px;
+  line-height: 1.5;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- 详情（工具输入等，等宽折叠） ---------- */
+.notify-detail {
+  margin-top: 8px;
+  padding: 8px 10px;
+  max-height: 132px;
+  overflow: auto;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.26);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--text-dim);
+  font-family: "Cascadia Mono", Consolas, "SFMono-Regular", Menlo, monospace;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+/* ---------- 交互表单（提问 / 权限备注） ---------- */
+.notify-form {
+  position: relative;
+  padding: 0 20px 4px;
+  max-height: 340px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+.notify-form::-webkit-scrollbar { width: 6px; }
+.notify-form::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+}
+.notify-form::-webkit-scrollbar-track { background: transparent; }
+
+.q-block {
+  padding: 8px 0 10px;
+  border-top: 1px solid rgba(255, 255, 255, 0.08);
+}
+.q-block:first-child { border-top: none; }
+.q-head {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  margin-bottom: 8px;
+}
+.q-chip {
+  flex: 0 0 auto;
+  font-size: 10.5px;
+  line-height: 1;
+  padding: 3px 7px;
+  border-radius: 6px;
+  color: var(--text-dim);
+  background: rgba(255, 255, 255, 0.09);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+}
+.q-text {
+  font-size: 13.5px;
+  font-weight: 500;
+  line-height: 1.4;
+  color: var(--text);
+}
+.q-options {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.q-option {
+  display: grid;
+  grid-template-columns: 18px 1fr;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 8px 10px;
+  text-align: left;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background 0.15s, border-color 0.15s, transform 0.1s;
+}
+.q-option:hover { background: rgba(255, 255, 255, 0.11); }
+.q-option:active { transform: scale(0.99); }
+.q-option.selected {
+  border-color: var(--accent-a);
+  background: linear-gradient(135deg, rgba(91, 140, 255, 0.22), rgba(139, 124, 246, 0.18));
+}
+.q-option-idx {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.1);
+  font-size: 10.5px;
+  color: var(--text-dim);
+}
+.q-option.selected .q-option-idx {
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+  color: #fff;
+}
+.q-option-label { line-height: 1.35; }
+.q-option-desc {
+  grid-column: 2;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--text-dim);
+  opacity: 0.85;
+}
+.q-custom {
+  width: 100%;
+  margin-top: 7px;
+  height: 32px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text);
+  font-family: inherit;
+  font-size: 13px;
+  outline: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.q-custom::placeholder { color: rgba(245, 246, 250, 0.38); }
+.q-custom:focus {
+  border-color: var(--accent-a);
+  background: rgba(0, 0, 0, 0.34);
+}
+
+@keyframes qShake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-4px); }
+  40% { transform: translateX(4px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(3px); }
+}
+.shake { animation: qShake 0.32s ease; }
+
+/* ---------- 按钮行 ---------- */
 .notify-actions {
   position: relative;
   display: flex;
   gap: 8px;
-  padding: 2px 20px 14px;
+  padding: 8px 20px 16px;
 }
 .notify-action {
   flex: 1;

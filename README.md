@@ -64,16 +64,32 @@ npm start
 ### 后台运行
 应用关闭窗口后不会退出，而是隐藏在系统托盘（任务栏右侧的 🍅 图标），计时继续，到点照常弹窗提醒。**退出请在托盘右键菜单选择「退出」。**
 
-## 🤖 Agent 集成（Claude Code / OpenCode）
+## 🤖 Agent 集成（ZCode / Claude Code / VS Code Copilot / Trae / Cursor / OpenCode / Codex / Qwen Code）
 
 应用运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址 + 随机 token 鉴权），让 AI 编程工具与番茄钟联动：
 
-- **需要确认 / 权限审批 / 任务完成时弹窗提醒** —— 人不在终端前也能看到
-- **弹窗远程批准**：开启 PreToolUse 双向确认后，可在弹窗上直接点「允许 / 拒绝」，决策回传给 Claude Code（超时安全回退，不会误放行）
+- **提问弹窗（可直接作答）**：agent 的 `AskUserQuestion` 会弹窗列出选项，单选/多选/自定义回答都行，答案直接回传给 agent
+- **权限弹窗（可直接审批）**：「允许一次 / 始终允许 / 拒绝」，可填备注作为拒绝理由；「始终允许」会写入对应宿主的权限规则
+- **知道是哪个任务在动**：弹窗带上下文——宿主与子 agent 名称、当前任务提示词、工具与命令、项目名、会话尾号（`pomodoro-hook.js sessions` 可查看跟踪明细）
+- **通知弹窗**：任务完成、异常等纯通知，看完即走，同样带上下文
 - **专注期活动统计**：主窗口显示 `🤖 工具 N · 打断 M`，专注结束弹窗汇总本期 agent 产出
 - **休息建议**：agent 跑完任务而你仍在专注时段，弹窗建议趁机休息，一键跳到休息
 
-**Claude Code 三步接入**：应用保持运行 → 打开设置抽屉点击「复制 Hook 配置」→ 把片段粘贴进 `~/.claude/settings.json` 的 `hooks` 字段。应用会自动把 hook 脚本安装到 `%APPDATA%\番茄钟\hook\pomodoro-hook.js`，配置一次即可。
+超时未决策一律落回**拒绝/取消**，手动关窗则回退终端原生询问——不会替你放行。
+
+**一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点 **一键安装**，配置直接写好（原文件自动备份），面板上会告诉你写了哪些文件、有哪些注意事项；**装失败也不用慌**，面板会给出一模一样的命令行让你复制到终端执行。
+
+也可以走命令行（「复制安装命令」按钮复制的是这条）：
+
+```bash
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
+```
+
+也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，所以审批挂 `PreToolUse`；且 VS Code **会忽略 matcher**，只拦高风险工具的判断在脚本里做）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，审批同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，所以先用它收窄）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 只有 `~/.codex/config.toml` 的 `notify`（回合结束通知，无弹窗审批）。
+
+> 两个需要留意的点：
+> - **VS Code** 默认也会读 `~/.claude/settings.json`，配过 Claude Code 的机器会被跑两遍（且 Claude 那份的 matcher 会被忽略 → 每个工具都触发）。建议在 VS Code 设置里加 `"chat.hookFilesLocations": { "~/.claude/settings.json": false }`。
+> - **Trae** 同样会合并 Claude Code 的 hook 配置（官方明说会"合并执行"），而且创建 Hook 时必须选**「本地自动运行」**——沙箱模式限制了系统权限，hook 可能连不上本机网关，表现就是"配了但没弹窗"，连不上时它是静默跳过的。
 
 任意脚本也能直接调用（token 见 `%APPDATA%\番茄钟\gateway.json`）：
 
@@ -88,7 +104,8 @@ OpenCode 插件接入、远程允许/拒绝、HTTP API 全量说明见 **[Agent 
 ## 🛠️ 技术实现
 
 - **主进程**（`main.js`）：窗口管理、系统托盘、通知弹窗、单实例锁
-- **Agent 网关**（`gateway.js`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；双向确认经长轮询回传决策；hook CLI（`bin/pomodoro-hook.js`）零依赖，应用未运行时静默退出，绝不阻断 agent
+- **Agent 网关**（`gateway.js`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；ask / permission / notification 三类交互经长轮询回传决策；hook CLI（`bin/pomodoro-hook.js`）零依赖，应用未运行时静默退出，绝不阻断 agent
+- **一键安装**（`main.js`）：主进程用 Electron 自带的 Node（`ELECTRON_RUN_AS_NODE=1`）跑 hook CLI 写配置，所以本机没装 node 也能装；成败按 CLI 退出码判断（未知宿主 / 写盘失败都非零退出），失败时把等价命令行交还给界面供复制
 - **迷你悬浮 & 贴边隐藏**：手动光标跟随拖拽（原生 drag 区会吞掉 `:hover`）；贴边收起时窗口带透明留白绕开 Windows 约 32×39 的最小窗口限制，仅靠屏幕边缘的 6px 绘制进度条，透明区域完全穿透（可见性与点击均不受影响）
 - **渲染进程**（`renderer/`）：Win11 风格 UI + 番茄钟逻辑
 - **安全桥接**（`preload.js`）：contextBridge 隔离

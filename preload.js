@@ -13,17 +13,25 @@ contextBridge.exposeInMainWorld('pomodoro', {
   dockReveal: () => ipcRenderer.send('mini:dock-reveal'),
   dockHide: () => ipcRenderer.send('mini:dock-hide-request'),
 
-  // 通知
+  // 通知 / 交互弹窗
   showNotify: (payload) => ipcRenderer.send('notify:show', payload),
-  closeNotify: () => ipcRenderer.send('notify:close'),
+  closeNotify: (id) => ipcRenderer.send('notify:close', id),
+  // 弹窗页按 id 取回完整 payload（提问内容可能很长，不走 URL query）
+  getNotifyPayload: (id) => ipcRenderer.invoke('notify:payload', id),
+  // 弹窗页实测内容高度后回传，主进程据此调整窗口尺寸
+  resizeNotify: (width, height) => ipcRenderer.send('notify:resize', { width, height }),
 
-  // 确认弹窗按钮点击（agent 网关长轮询等待该结果）
+  // 交互弹窗（ask / permission / custom）用户决策结果
+  respondInteraction: (payload) => ipcRenderer.send('interaction:respond', payload),
+  // 旧接口：只有 action 的确认弹窗
   respondConfirm: (id, action) => ipcRenderer.send('confirm:respond', { id, action }),
 
   // Agent 网关
   setGatewayEnabled: (enabled) => ipcRenderer.send('gateway:set-enabled', enabled),
   requestGatewayState: () => ipcRenderer.send('gateway:get-state'),
   copyText: (text) => ipcRenderer.send('clipboard:write', text),
+  // 一键安装 hook：主进程直接跑 CLI 写配置，返回 { ok, message, files, command, log }
+  installHook: (agent, clean) => ipcRenderer.invoke('hook:install', { agent, clean }),
 
   // 托盘状态同步
   updateTray: (state) => ipcRenderer.send('tray:update', state),

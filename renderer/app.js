@@ -61,7 +61,12 @@ const PomodoroApp = (() => {
     sAuto: $('sAuto'),
     sGateway: $('sGateway'),
     agentMeta: $('agentMeta'),
+    agentSelect: $('agentSelect'),
     btnCopyHook: $('btnCopyHook'),
+    btnCopyInstall: $('btnCopyInstall'),
+    btnInstallHook: $('btnInstallHook'),
+    installClean: $('installClean'),
+    installResult: $('installResult'),
     agentActivity: $('agentActivity'),
   };
 
@@ -361,17 +366,189 @@ const PomodoroApp = (() => {
     return ` · ${parts.join(' ')}`;
   }
 
-  // Claude Code settings.json 的 hooks 片段（复制给用户粘贴）
-  function buildHookSnippet(hookPath) {
-    const cmd = `node "${hookPath}"`;
+  // 各家 agent 的 hook 配置片段（复制给用户粘贴/手动编辑）
+  function buildHookSnippet(agent, hookPath, pluginPath) {
+    // 统一带 --source，弹窗徽标才不会认错宿主
+    const cmd = (src) => `node "${hookPath}" --source ${src}`;
+    if (agent === 'zcode') {
+      return JSON.stringify({
+        hooks: {
+          enabled: true,
+          timeoutMs: 600000,
+          events: {
+            PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 600000 }] }],
+            // AskUserQuestion：ZCode 会同时触发 PreToolUse 与 PermissionRequest，两个都接上
+            PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 600000 }] }],
+            Stop: [{ hooks: [{ type: 'command', command: cmd('zcode') }] }],
+            PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode') }] }],
+            PostToolUseFailure: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode') }] }],
+          },
+        },
+      }, null, 2);
+    }
+    if (agent === 'opencode') {
+      return JSON.stringify({
+        plugin: [`file://${(pluginPath || '').replace(/\\/g, '/')}`],
+      }, null, 2);
+    }
+    if (agent === 'vscode') {
+      // VS Code Copilot Agent hooks：与 Claude Code 同格式，用户级放 ~/.copilot/hooks/*.json。
+      // 只有 8 个事件（无 PermissionRequest / Notification），审批走 PreToolUse；
+      // VS Code 会忽略 matcher，只拦高风险工具的判断在 CLI 里做。
+      // timeout 单位是秒、默认只有 30 → 要等弹窗就必须显式调大。
+      return JSON.stringify({
+        version: 1,
+        hooks: {
+          PreToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 600 }],
+          PostToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          SessionStart: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          UserPromptSubmit: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          SubagentStart: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          SubagentStop: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          PreCompact: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+          Stop: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
+        },
+      }, null, 2);
+    }
+    if (agent === 'trae') {
+      // Trae：全局 %userprofile%/.trae-cn/hooks.json，Claude Code 那种嵌套格式。
+      // 6 个事件（有 Notification，无 PermissionRequest）→ 审批挂 PreToolUse。
+      // 与 VS Code 不同：Trae 的 matcher 真的生效，所以先用它把普通工具挡在外面。
+      return JSON.stringify({
+        version: 1,
+        hooks: {
+          PreToolUse: [{
+            matcher: 'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile',
+            hooks: [{ type: 'command', command: cmd('trae'), timeout: 600 }],
+          }],
+          Notification: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          Stop: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          SessionStart: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+          PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
+        },
+      }, null, 2);
+    }
+    if (agent === 'cursor') {
+      // Cursor：~/.cursor/hooks.json（用户级）或 .cursor/hooks.json（项目级）
+      return JSON.stringify({
+        version: 1,
+        hooks: {
+          beforeShellExecution: [{ command: cmd('cursor'), timeout: 600 }],
+          preToolUse: [{ command: cmd('cursor'), timeout: 600 }],
+          beforeMCPExecution: [{ command: cmd('cursor'), timeout: 600 }],
+          beforeSubmitPrompt: [{ command: cmd('cursor') }],
+          afterFileEdit: [{ command: cmd('cursor') }],
+          afterShellExecution: [{ command: cmd('cursor') }],
+          afterAgentResponse: [{ command: cmd('cursor') }],
+          stop: [{ command: cmd('cursor') }],
+        },
+      }, null, 2);
+    }
+    if (agent === 'codex') {
+      // Codex 只有 notify：回合结束回调一次（无权限决策通道）
+      return [
+        '# ~/.codex/config.toml',
+        `notify = ["node", "${(hookPath || '').replace(/\\/g, '\\\\')}", "codex-notify"]`,
+      ].join('\n');
+    }
+    if (agent === 'qwen') {
+      return JSON.stringify({
+        hooks: {
+          Notification: [{ hooks: [{ type: 'command', command: cmd('qwen') }] }],
+          PreToolUse: [{ matcher: 'AskUserQuestion|askQuestions', hooks: [{ type: 'command', command: cmd('qwen'), timeout: 600 }] }],
+          Stop: [{ hooks: [{ type: 'command', command: cmd('qwen') }] }],
+          PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('qwen') }] }],
+        },
+      }, null, 2);
+    }
     return JSON.stringify({
       hooks: {
-        Notification: [{ hooks: [{ type: 'command', command: cmd }] }],
-        Stop: [{ hooks: [{ type: 'command', command: cmd }] }],
-        SubagentStop: [{ hooks: [{ type: 'command', command: cmd }] }],
-        PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd }] }],
+        Notification: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
+        PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 600 }] }],
+        PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 600 }] }],
+        Stop: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
+        SubagentStop: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
+        PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code') }] }],
       },
     }, null, 2);
+  }
+
+  // 一键安装命令：交给 hook CLI 自己写配置（会先备份原文件）
+  function buildInstallCommand(agent, hookPath) {
+    return `node "${hookPath}" install --agent ${agent}`;
+  }
+
+  // ---- 一键安装结果面板 ----
+  // 成功：列出写入的配置文件 + 生效条件；失败：给出原因和可复制的命令行
+  const AGENT_LABELS = {
+    zcode: 'ZCode', claude: 'Claude Code', vscode: 'VS Code Copilot', trae: 'Trae',
+    cursor: 'Cursor', opencode: 'OpenCode', codex: 'Codex CLI', qwen: 'Qwen Code', all: '全部宿主',
+  };
+
+  function el(tag, cls, text) {
+    const n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  // 按钮短暂显示反馈后复原（复制/安装按钮共用）
+  function flash(btn, text, ms = 1500) {
+    if (!btn) return;
+    const old = btn.dataset.label || btn.textContent;
+    btn.dataset.label = old;
+    btn.textContent = text;
+    setTimeout(() => { btn.textContent = btn.dataset.label; }, ms);
+  }
+
+  function renderInstallResult(res) {
+    const box = dom.installResult;
+    if (!box) return;
+    box.innerHTML = '';
+    box.hidden = false;
+
+    box.appendChild(el('div', 'install-head ' + (res.ok ? 'ok' : 'fail'),
+      res.ok ? `✓ 已安装（${AGENT_LABELS[res.agent] || res.agent}）` : '✗ 安装失败'));
+    box.appendChild(el('div', 'install-msg', res.message || ''));
+
+    if (res.ok) {
+      if (res.nodeMissing) {
+        box.appendChild(el('div', 'install-warn',
+          '⚠ 没检测到 node 命令：配置已经写好了，但 hook 运行时要靠 node 拉起脚本，' +
+          '请先装 Node.js（或把它加进 PATH），否则 agent 那边不会弹窗。'));
+      }
+      // CLI 打印的注意事项（沙箱运行、与 Claude Code 双跑之类）提到面板上，别埋进日志
+      if (res.notes) box.appendChild(el('div', 'install-warn', res.notes));
+      box.appendChild(el('div', 'install-hint',
+        '重启对应的 agent / 编辑器后生效（VS Code、Trae、Cursor 会热加载配置，Claude Code 需要重开会话）。'));
+    } else {
+      // 退路：手动执行等价的命令
+      box.appendChild(el('div', 'install-hint', '可以在终端里手动执行下面这条命令，效果一样：'));
+      const code = el('code', 'install-cmd', res.command || '');
+      box.appendChild(code);
+      const copy = el('button', 'copy-btn small', '复制命令');
+      copy.addEventListener('click', () => {
+        window.pomodoro.copyText(res.command || '');
+        flash(copy, '已复制 ✓');
+      });
+      box.appendChild(copy);
+      if (res.command) {
+        box.appendChild(el('div', 'install-hint',
+          '提示：命令里的 hook 脚本路径若不存在，说明应用没能把脚本释放到用户目录，' +
+          '可先用管理员权限或换一台磁盘可写的机器重试。'));
+      }
+    }
+
+    if (res.log) {
+      const d = document.createElement('details');
+      d.className = 'install-log';
+      const s = document.createElement('summary');
+      s.textContent = '查看日志';
+      d.appendChild(s);
+      d.appendChild(el('pre', '', res.log));
+      box.appendChild(d);
+    }
   }
 
   // ---- 事件绑定 ----
@@ -560,12 +737,50 @@ const PomodoroApp = (() => {
     dom.sGateway.addEventListener('change', () => {
       window.pomodoro.setGatewayEnabled(dom.sGateway.checked);
     });
+
+    const currentAgent = () => (dom.agentSelect ? dom.agentSelect.value : 'claude');
+
+    // 切换宿主后把上一次的安装结果收起来，免得看着像"已经装过了"
+    if (dom.agentSelect && dom.installResult) {
+      dom.agentSelect.addEventListener('change', () => {
+        dom.installResult.hidden = true;
+        dom.installResult.innerHTML = '';
+      });
+    }
+
     dom.btnCopyHook.addEventListener('click', () => {
       if (!gatewayState.hookPath) return;
-      window.pomodoro.copyText(buildHookSnippet(gatewayState.hookPath));
-      dom.btnCopyHook.textContent = '已复制 ✓';
-      setTimeout(() => { dom.btnCopyHook.textContent = '复制 Hook 配置'; }, 1500);
+      const agent = currentAgent();
+      window.pomodoro.copyText(buildHookSnippet(agent, gatewayState.hookPath, gatewayState.pluginPath));
+      flash(dom.btnCopyHook, '已复制 ✓');
     });
+
+    dom.btnCopyInstall.addEventListener('click', () => {
+      if (!gatewayState.hookPath) return;
+      window.pomodoro.copyText(buildInstallCommand(currentAgent(), gatewayState.hookPath));
+      flash(dom.btnCopyInstall, '已复制 ✓');
+    });
+
+    // 一键安装：主进程直接跑 CLI 写配置；失败则展示命令行让用户自己执行
+    if (dom.btnInstallHook) {
+      dom.btnInstallHook.addEventListener('click', async () => {
+        if (dom.btnInstallHook.disabled) return;
+        const agent = currentAgent();
+        const clean = !!(dom.installClean && dom.installClean.checked);
+        dom.btnInstallHook.disabled = true;
+        flash(dom.btnInstallHook, '安装中…', 20000);
+        try {
+          const res = await window.pomodoro.installHook(agent, clean);
+          dom.btnInstallHook.textContent = '一键安装';
+          renderInstallResult(res || { ok: false, agent, message: '主进程没有返回结果' });
+        } catch (e) {
+          dom.btnInstallHook.textContent = '一键安装';
+          renderInstallResult({ ok: false, agent, message: '安装调用异常：' + (e && e.message ? e.message : e) });
+        } finally {
+          dom.btnInstallHook.disabled = false;
+        }
+      });
+    }
     window.pomodoro.onAgentActivity((a) => {
       if (a) {
         agentActivity = a;
