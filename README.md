@@ -87,6 +87,8 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zco
 
 也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，所以审批挂 `PreToolUse`；且 VS Code **会忽略 matcher**，只拦高风险工具的判断在脚本里做）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，审批同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，所以先用它收窄）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 只有 `~/.codex/config.toml` 的 `notify`（回合结束通知，无弹窗审批）。
 
+> 挂 `PreToolUse` 的两家（VS Code / Trae）默认**跟随宿主自己的自动允许设置**：读宿主的自动批准配置，命中就不弹窗、也不回决策，交回宿主原本的策略 —— 免得你已经设了自动运行还被反复打断。想查当前判定用 `node pomodoro-hook.js host-perms --source vscode --command "ls -la"`，想关掉跟随设 `POMODORO_RESPECT_HOST_AUTO=0`。细节见 [`docs/agent-hooks.md`](docs/agent-hooks.md#跟不跟随宿主的自动允许)。
+
 > 两个需要留意的点：
 > - **VS Code** 默认也会读 `~/.claude/settings.json`，配过 Claude Code 的机器会被跑两遍（且 Claude 那份的 matcher 会被忽略 → 每个工具都触发）。建议在 VS Code 设置里加 `"chat.hookFilesLocations": { "~/.claude/settings.json": false }`。
 > - **Trae** 同样会合并 Claude Code 的 hook 配置（官方明说会"合并执行"），而且创建 Hook 时必须选**「本地自动运行」**——沙箱模式限制了系统权限，hook 可能连不上本机网关，表现就是"配了但没弹窗"，连不上时它是静默跳过的。
