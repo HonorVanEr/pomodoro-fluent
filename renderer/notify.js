@@ -36,6 +36,12 @@ const SOURCE_LABELS = {
 };
 const TIMER_FLAVORS = new Set(['work', 'break', 'longBreak', 'idle', 'custom']);
 
+// 自动关闭时长：交互窗按 timeoutMs（决策剩余时间）走；
+// 纯通知默认 5s，带 timeoutMs 的（如阶段结束提醒）按给定值停留更久
+const DEFAULT_NOTIFY_MS = 5000;
+const MIN_NOTIFY_MS = 3000;
+const MAX_NOTIFY_MS = 600000;
+
 const ICONS = {
   work: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 2v6M12 2C6 2 3 6 3 9c0 2 1.5 3 3 3 2 0 3-1 3-3 0-2-1-4-2.2-5C8 4.6 9.5 4 12 4"/>
@@ -146,6 +152,41 @@ function respond(result) {
 
 function dismiss() {
   if (api && api.closeNotify) api.closeNotify(POPUP_ID);
+}
+
+// ---------------- 自动关闭（鼠标悬停时暂停）----------------
+// 阶段结束这类提醒要留出「读完并点按钮」的时间：光把时长拉长还不够，
+// 鼠标停在弹窗上时连倒计时一起暂停（进度条同步暂停），移开后再按剩余时间收尾。
+let autoCloseTimer = null;
+let autoCloseRemainMs = 0;
+let autoCloseAt = 0;
+
+function resumeAutoClose(ms) {
+  clearTimeout(autoCloseTimer);
+  autoCloseRemainMs = Math.max(0, ms);
+  autoCloseAt = Date.now() + autoCloseRemainMs;
+  autoCloseTimer = setTimeout(() => {
+    autoCloseTimer = null;
+    if (!state.submitted) dismiss();
+  }, autoCloseRemainMs);
+}
+
+function pauseAutoClose() {
+  if (!autoCloseTimer) return;
+  clearTimeout(autoCloseTimer);
+  autoCloseTimer = null;
+  autoCloseRemainMs = Math.max(0, autoCloseAt - Date.now());
+}
+
+function setAutoClosePaused(paused) {
+  const fill = el('notifyProgress');
+  if (paused) {
+    pauseAutoClose();
+    if (fill) fill.style.animationPlayState = 'paused';
+  } else {
+    if (!autoCloseTimer && !state.submitted && autoCloseRemainMs > 0) resumeAutoClose(autoCloseRemainMs);
+    if (fill) fill.style.animationPlayState = 'running';
+  }
 }
 
 // ---------------- 渲染：ask ----------------
@@ -463,10 +504,12 @@ function render(payload) {
 
   el('notifyIcon').innerHTML = ICONS[state.flavor] || ICONS.agent;
 
-  // 进度条：交互窗为决策剩余时间；通知为 5s 自动关闭
+  // 进度条：交互窗为决策剩余时间；通知默认 5s，显式带 timeoutMs 时按更长停留
   const durationMs = state.interactive
-    ? Math.min(Math.max(state.timeoutMs, 5000), 600000)
-    : 5000;
+    ? Math.min(Math.max(state.timeoutMs, 5000), MAX_NOTIFY_MS)
+    : (state.timeoutMs > 0
+      ? Math.min(Math.max(state.timeoutMs, MIN_NOTIFY_MS), MAX_NOTIFY_MS)
+      : DEFAULT_NOTIFY_MS);
   el('notifyProgress').style.animationDuration = `${durationMs}ms`;
 
   if (state.kind === 'ask') renderAsk(p);
@@ -476,8 +519,8 @@ function render(payload) {
     renderActions(p.actions, (id) => respond({ action: id, answers: {}, text: '' }));
   }
 
-  // 走完倒计时自行关闭（网关侧会同时按 timeout 兜底）
-  setTimeout(() => { if (!state.submitted) dismiss(); }, durationMs);
+  // 走完倒计时自行关闭（网关侧会同时按 timeout 兜底；悬停可暂停，见 setAutoClosePaused）
+  resumeAutoClose(durationMs);
 
   // 渲染完成后把真实高度回传给主进程（延后到布局稳定，见 scheduleAutoResize）
   scheduleAutoResize();
@@ -495,6 +538,15 @@ function bindGlobal() {
     if (state.interactive) return; // 交互窗点击空白不关闭，避免误触丢答案
     if (e.target.closest('.notify-close')) return;
     dismiss();
+  });
+
+  // 鼠标停在弹窗上 → 暂停自动关闭（进度条同步暂停），移开继续。
+  // 交互窗本来就在等用户决策，不受影响。
+  card.addEventListener('pointerenter', () => {
+    if (!state.interactive) setAutoClosePaused(true);
+  });
+  card.addEventListener('pointerleave', () => {
+    if (!state.interactive) setAutoClosePaused(false);
   });
 
   document.addEventListener('keydown', (e) => {

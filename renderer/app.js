@@ -46,6 +46,7 @@ const PomodoroApp = (() => {
     btnMin: $('btnMin'),
     btnClose: $('btnClose'),
     btnSettings: $('btnSettings'),
+    btnGateway: $('btnGateway'),
     controlsHint: $('controlsHint'),
     iconPlay: $('iconPlay'),
     iconPause: $('iconPause'),
@@ -124,6 +125,14 @@ const PomodoroApp = (() => {
     work:      { label: '专注时间', hint: '保持专注，屏蔽干扰' },
     break:     { label: '短休息',   hint: '起来活动一下，喝口水' },
     longBreak: { label: '长休息',   hint: '辛苦了，好好放松一下' },
+  };
+
+  // 阶段结束弹窗：停留时长（默认 5s 太短，容易错过）与「进入下一阶段」按钮文案
+  const PHASE_NOTIFY_MS = 20000;
+  const NEXT_PHASE_LABEL = {
+    work: '开始下一轮专注',
+    break: '开始短休',
+    longBreak: '开始长休',
   };
 
   // ---- 渲染（按需更新：仅真正变化的 DOM 才写入，避免高频全量重排/重绘） ----
@@ -303,12 +312,14 @@ const PomodoroApp = (() => {
       state.completedFocus += 1;
       const stats = agentStatsSuffix();
       // 决定进入短休还是长休
-      if (state.completedFocus % state.rounds === 0) {
-        setPhase('longBreak');
-        notify('work', '专注完成！', '干得漂亮！进入长休息', `已完成 ${state.completedFocus} 个番茄${stats}`);
+      const next = state.completedFocus % state.rounds === 0 ? 'longBreak' : 'break';
+      setPhase(next);
+      if (next === 'longBreak') {
+        notifyPhaseEnd('work', '专注完成！', '干得漂亮！进入长休息',
+          `已完成 ${state.completedFocus} 个番茄${stats}`, NEXT_PHASE_LABEL.longBreak);
       } else {
-        setPhase('break');
-        notify('work', '专注完成！', '太棒了，休息一下再继续', `已完成 ${state.completedFocus} 个番茄${stats}`);
+        notifyPhaseEnd('work', '专注完成！', '太棒了，休息一下再继续',
+          `已完成 ${state.completedFocus} 个番茄${stats}`, NEXT_PHASE_LABEL.break);
       }
       // 自动进入下一阶段
       if (state.autoNext) {
@@ -317,7 +328,8 @@ const PomodoroApp = (() => {
     } else {
       // 休息结束 → 回到专注
       setPhase('work');
-      notify('break', '休息结束', '准备好开始下一轮专注了吗？', `即将开始第 ${state.completedFocus + 1} 轮`);
+      notifyPhaseEnd('break', '休息结束', '准备好开始下一轮专注了吗？',
+        `即将开始第 ${state.completedFocus + 1} 轮`, NEXT_PHASE_LABEL.work);
       if (state.autoNext) {
         setTimeout(() => { start(); }, 600);
       }
@@ -340,10 +352,26 @@ const PomodoroApp = (() => {
   }
 
   // ---- 通知 ----
-  function notify(type, title, message, sub) {
+  // extra 可带 timeoutMs（停留时长）与 actions（弹窗内的按钮）
+  function notify(type, title, message, sub, extra) {
     const api = window.pomodoro;
     if (!api) return;
-    api.showNotify({ type, title, message, sub });
+    api.showNotify({ type, title, message, sub, ...(extra || {}) });
+  }
+
+  // 阶段结束：弹窗停留更久（PHASE_NOTIFY_MS），并带上「进入下一阶段」按钮。
+  // 点按钮 → 主进程转成 start-next 命令 → 这里直接开跑下一阶段；
+  // 已开启自动进入下一阶段时，下一步早就跑起来了，按钮只作确认（点它不会重开）。
+  function notifyPhaseEnd(type, title, message, sub, nextLabel) {
+    notify(type, title, message, sub, {
+      timeoutMs: PHASE_NOTIFY_MS,
+      actions: state.autoNext
+        ? [{ id: 'ok', label: '知道了', style: 'primary' }]
+        : [
+          { id: 'start-next', label: nextLabel, style: 'primary' },
+          { id: 'later', label: '稍后再说', style: 'default' },
+        ],
+    });
   }
 
   // ---- Agent 活动（hook 上报）----
@@ -551,6 +579,24 @@ const PomodoroApp = (() => {
     }
   }
 
+  // ---- Agent 网关状态 → UI（标题栏按钮 + 设置抽屉开关，两处同一份状态）----
+  function applyGatewayUI() {
+    const on = !!gatewayState.enabled;
+    const port = gatewayState.port;
+
+    dom.sGateway.checked = on;
+    // 刚点开、主进程还没回推端口时先显示「启动中」，避免闪一下 null
+    dom.agentMeta.textContent = on ? (port ? `端口 ${port} · 运行中` : '启动中…') : '已停用';
+
+    dom.btnGateway.classList.toggle('gateway-on', on);
+    dom.btnGateway.setAttribute('aria-pressed', on ? 'true' : 'false');
+    dom.btnGateway.title = !on
+      ? 'Agent 网关已停用 · 点击启用'
+      : (port
+        ? `Agent 网关运行中（127.0.0.1:${port}）· 点击停用`
+        : 'Agent 网关启动中… · 点击停用');
+  }
+
   // ---- 事件绑定 ----
   function bindEvents() {
     // 阶段切换（未运行时）
@@ -681,6 +727,10 @@ const PomodoroApp = (() => {
     window.pomodoro.onTrayCommand((cmd) => {
       if (cmd === 'toggle') toggle();
       else if (cmd === 'reset') { stopTimer(); state.remainMs = state.totalMs; render({ instant: true }); }
+      else if (cmd === 'start-next') {
+        // 阶段结束弹窗里的「进入下一阶段」：没在跑就立刻开跑（已经在跑就忽略）
+        if (!state.running) start();
+      }
       else if (cmd === 'skip') {
         stopTimer();
         const was = state.phase;
@@ -722,17 +772,22 @@ const PomodoroApp = (() => {
       if (!dockState.hidden && dockState.edge) window.pomodoro.dockHide();
     });
 
-    // Agent 网关：状态回推 + 开关 + 复制 hook 配置
+    // Agent 网关：状态回推 + 开关（标题栏按钮与设置抽屉开关同源）+ 复制 hook 配置
     window.pomodoro.onGatewayState((gs) => {
       gatewayState = gs || {};
-      dom.sGateway.checked = !!gatewayState.enabled;
-      dom.agentMeta.textContent = gatewayState.enabled
-        ? `端口 ${gatewayState.port} · 运行中`
-        : '已停用';
+      applyGatewayUI();
       if (gatewayState.activity) {
         agentActivity = gatewayState.activity;
         updateAgentActivityUI();
       }
+    });
+    // 标题栏右上角：一键开关网关（与抽屉里的开关改的是同一份状态）
+    dom.btnGateway.addEventListener('click', () => {
+      const next = !gatewayState.enabled;
+      // 先乐观翻转，主进程回推真实状态（端口/失败）后再校正
+      gatewayState = { ...gatewayState, enabled: next, port: next ? gatewayState.port : null };
+      applyGatewayUI();
+      window.pomodoro.setGatewayEnabled(next);
     });
     dom.sGateway.addEventListener('change', () => {
       window.pomodoro.setGatewayEnabled(dom.sGateway.checked);
