@@ -341,6 +341,23 @@ const PomodoroApp = (() => {
     if (state.timerId) { clearInterval(state.timerId); state.timerId = null; }
   }
 
+  // 跳到下一阶段并立即开始计时。
+  // 三处入口共用：主界面/悬浮窗的「跳过」按钮、托盘菜单「跳到下一阶段」。
+  // 手动点了就是想让下一阶段跑起来，所以这里无条件 start()，
+  // 不受「自动进入下一阶段」开关影响（那个开关只管阶段自然结束时的行为）。
+  function advancePhase() {
+    stopTimer();
+    const was = state.phase;
+    if (was === 'work') {
+      state.completedFocus += 1;
+      if (state.completedFocus % state.rounds === 0) setPhase('longBreak');
+      else setPhase('break');
+    } else {
+      setPhase('work');
+    }
+    start();
+  }
+
   // ---- 切换阶段 ----
   function setPhase(phase, opts = {}) {
     state.phase = phase;
@@ -614,15 +631,14 @@ const PomodoroApp = (() => {
 
   // ---- 事件绑定 ----
   function bindEvents() {
-    // 阶段切换（未运行时）
+    // 阶段切换：切过去就直接开跑，不用再点一次「开始」
+    // （Tab 高亮由 render() 统一同步，这里不用自己 toggle）
     dom.phaseTabs.querySelectorAll('.phase-tab').forEach((tab) => {
       tab.addEventListener('click', () => {
         const p = tab.dataset.phase;
         if (p === state.phase) return;
-        // 点击阶段切换：若当前正在运行先暂停
-        if (state.running) pause();
-        setPhase(p, { resetRound: false });
-        dom.phaseTabs.querySelectorAll('.phase-tab').forEach((t) => t.classList.toggle('active', t === tab));
+        setPhase(p, { resetRound: false }); // 内部会停掉旧计时
+        start();
       });
     });
 
@@ -639,18 +655,9 @@ const PomodoroApp = (() => {
       render({ instant: true });
     });
 
-    // 跳过：跳过的番茄不算数，不记流水
+    // 跳过：跳过的番茄不算数，不记流水；跳到下一阶段后立刻开始计时
     dom.btnSkip.addEventListener('click', () => {
-      stopTimer();
-      // 跳过当前阶段，直接完成（setPhase 内部已渲染）
-      const was = state.phase;
-      if (was === 'work') {
-        state.completedFocus += 1;
-        if (state.completedFocus % state.rounds === 0) setPhase('longBreak');
-        else setPhase('break');
-      } else {
-        setPhase('work');
-      }
+      advancePhase();
     });
 
     // 固定悬浮：收缩为倒计时小方窗（再次点击小窗展开）
@@ -747,15 +754,7 @@ const PomodoroApp = (() => {
         if (!state.running) start();
       }
       else if (cmd === 'skip') {
-        stopTimer();
-        const was = state.phase;
-        if (was === 'work') {
-          state.completedFocus += 1;
-          if (state.completedFocus % state.rounds === 0) setPhase('longBreak');
-          else setPhase('break');
-        } else {
-          setPhase('work');
-        }
+        advancePhase();
       }
     });
 
