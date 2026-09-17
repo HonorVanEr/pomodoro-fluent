@@ -637,6 +637,89 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 .install-clean input { accent-color: var(--accent-a); cursor: pointer; }
 
+/* ---------- 设置抽屉：关于 / 检查更新 ---------- */
+.about-card {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.about-icon {
+  flex: 0 0 auto;
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  border-radius: 9px;
+  background: linear-gradient(135deg, var(--accent-a), var(--accent-c));
+  color: #23151a;
+}
+.about-body { flex: 1; min-width: 0; }
+.about-name {
+  font-size: 13px;
+  font-weight: 600;
+}
+.about-version {
+  display: inline-block;
+  margin-left: 4px;
+  padding: 1px 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  color: var(--text-dim);
+  font-size: 11px;
+  font-weight: 500;
+}
+.about-meta {
+  margin-top: 3px;
+  color: var(--text-faint);
+  font-size: 11px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.about-links {
+  display: flex;
+  gap: 8px;
+  margin-top: 2px;
+}
+.about-links .copy-btn.small { flex: 0 0 auto; }
+
+/* 检查结果（沿用一键安装结果的观感） */
+.update-result {
+  margin: 8px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--card-border);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.update-head { font-weight: 600; margin-bottom: 4px; }
+.update-head.new { color: #2ed573; }
+.update-head.latest { color: var(--text-dim); }
+.update-head.fail { color: #ff6b6b; }
+.update-body {
+  color: var(--text);
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-notes {
+  margin-top: 6px;
+  max-height: 150px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--card-border);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.24);
+  color: var(--text-dim);
+  font-size: 11px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.update-result .copy-btn.small { margin-top: 8px; }
+
 /* ---------- 一键安装结果 ---------- */
 .install-result {
   margin: 0 0 10px;

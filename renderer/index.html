@@ -202,6 +202,29 @@
       </div>
       <div class="install-result" id="installResult" hidden></div>
 
+      <div class="drawer-divider"></div>
+      <div class="drawer-section-title">关于</div>
+      <div class="about-card">
+        <div class="about-icon">
+          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2v6M12 2C6 2 3 6 3 9c0 2 1.5 3 3 3 2 0 3-1 3-3 0-2-1-4-2.2-5C8 4.6 9.5 4 12 4"/>
+            <path d="M12 2c6 0 9 4 9 7 0 2-1.5 3-3 3-2 0-3-1-3-3 0-2 1-4 2.2-5C16 4.6 14.5 4 12 4"/>
+            <path d="M12 4v2"/>
+            <path d="M12 8v1"/>
+            <path d="M12 22c-4 0-6-2-6-4 0-2 2-3 6-3s6 1 6 3c0 2-2 4-6 4z"/>
+          </svg>
+        </div>
+        <div class="about-body">
+          <div class="about-name">番茄钟 <span class="about-version" id="aboutVersion">—</span></div>
+          <div class="about-meta" id="aboutMeta">读取版本信息…</div>
+          <div class="about-links">
+            <button class="copy-btn small" id="btnCheckUpdate" title="查一次 GitHub 上的最新版本（只有点这里时才联网）">检查更新</button>
+            <button class="copy-btn small" id="btnOpenRepo" title="打开项目主页 / 所有版本">项目主页</button>
+          </div>
+        </div>
+      </div>
+      <div class="update-result" id="updateResult" hidden></div>
+
       <button class="drawer-save" id="drawerSave">保存设置</button>
     </div>
   </div>

@@ -1,10 +1,11 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, Notification, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, Notification, clipboard, shell } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const https = require('https');
 const { execFile } = require('child_process');
 const { createGateway } = require('./gateway');
 
@@ -1074,6 +1075,101 @@ ipcMain.on('confirm:respond', (e, payload) => {
 // 渲染进程请求写剪贴板（复制 hook 配置片段）
 ipcMain.on('clipboard:write', (_e, text) => {
   try { clipboard.writeText(String(text || '')); } catch (e) { /* ignore */ }
+});
+
+// ---------------------------------------------------------------------------
+// 关于 / 检查更新
+// 番茄钟本身不联网：只有用户在设置里点了「检查更新」才发这一次请求。
+// 请求放在主进程，是因为渲染层有 CSP（default-src 'self'），取不到 GitHub。
+// 不引 electron-updater，用内置 https 拉 release 接口（和 hook CLI 一样零依赖），
+// 发现新版本后交给系统浏览器去下载，应用自己不落地安装包。
+// ---------------------------------------------------------------------------
+const REPO = { owner: 'HonorVanEr', name: 'pomodoro-fluent' };
+const REPO_URL = `https://github.com/${REPO.owner}/${REPO.name}`;
+const UPDATE_API = `https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases/latest`;
+
+// 只取前导数字段：v1.1.3 → [1,1,3]；遇到非数字段就停，
+// 所以 1.1.3-beta 也是 [1,1,3]（预发布尾缀不参与比较），不会被拆出第 4 段 0
+function parseVersion(v) {
+  const parts = String(v || '').replace(/^v/i, '').split('.');
+  const nums = [];
+  for (const seg of parts) {
+    const m = /^\d+/.exec(seg);
+    if (!m) break;
+    nums.push(parseInt(m[0], 10));
+  }
+  return nums.length ? nums : [0];
+}
+function compareVersion(a, b) {
+  const pa = parseVersion(a);
+  const pb = parseVersion(b);
+  for (let i = 0; i < Math.max(pa.length, pb.length); i += 1) {
+    const d = (pa[i] || 0) - (pb[i] || 0);
+    if (d !== 0) return d;
+  }
+  return 0;
+}
+
+function fetchLatestRelease() {
+  return new Promise((resolve, reject) => {
+    const req = https.get(
+      UPDATE_API,
+      { headers: { 'User-Agent': 'pomodoro-fluent', Accept: 'application/vnd.github+json' }, timeout: 10000 },
+      (res) => {
+        let body = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { body += c; });
+        res.on('end', () => {
+          // 匿名调用的额度是每小时 60 次，自用足够，但被限要给句人话
+          if (res.statusCode === 403) { reject(new Error('GitHub 接口限流，稍后再试')); return; }
+          if (res.statusCode === 404) { reject(new Error('仓库还没有 release')); return; }
+          if (res.statusCode >= 400) { reject(new Error(`GitHub 返回 ${res.statusCode}`)); return; }
+          try { resolve(JSON.parse(body)); } catch (e) { reject(new Error('返回内容解析失败')); }
+        });
+      },
+    );
+    req.on('timeout', () => req.destroy(new Error('请求超时，检查网络是否可达')));
+    req.on('error', (e) => reject(new Error((e && e.message) || '网络请求失败')));
+  });
+}
+
+ipcMain.handle('app:info', () => ({
+  name: app.getName(),
+  version: app.getVersion(),
+  electron: process.versions.electron || '',
+  node: process.versions.node || '',
+  chrome: process.versions.chrome || '',
+  platform: `${process.platform}-${process.arch}`,
+  repoUrl: REPO_URL,
+  license: 'MIT',
+  author: 'HonorVanEr',
+}));
+
+ipcMain.handle('app:check-update', async () => {
+  const current = app.getVersion();
+  try {
+    const data = await fetchLatestRelease();
+    const latest = String((data && data.tag_name) || '').replace(/^v/i, '');
+    if (!latest) return { ok: false, error: '没读到 release 版本号' };
+    return {
+      ok: true,
+      currentVersion: current,
+      latestVersion: latest,
+      hasUpdate: compareVersion(current, latest) < 0,
+      releaseUrl: (data && data.html_url) || `${REPO_URL}/releases/latest`,
+      publishedAt: (data && data.published_at) || '',
+      notes: String((data && data.body) || '').trim().slice(0, 800),
+    };
+  } catch (e) {
+    return { ok: false, error: (e && e.message) || '网络请求失败' };
+  }
+});
+
+// 用系统浏览器打开（限 http/https，别把 file:// 之类的东西丢出去）
+ipcMain.on('app:open-external', (_e, url) => {
+  if (typeof url === 'string' && /^https?:\/\//i.test(url)) {
+    try { shell.openExternal(url); } catch (e) { /* ignore */ }
+  }
 });
 
 // ---------------------------------------------------------------------------
