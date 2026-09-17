@@ -75,8 +75,23 @@ npm start
 - **通知弹窗**：任务完成、异常等纯通知，看完即走，同样带上下文
 - **专注期活动统计**：主窗口显示 `🤖 工具 N · 打断 M`，专注结束弹窗汇总本期 agent 产出
 - **休息建议**：agent 跑完任务而你仍在专注时段，弹窗建议趁机休息，一键跳到休息
+- **两种「临时关闭」**：右上角 **×** ＝交给终端（回退宿主原生询问）；底部 **暂时收起** ＝挂起，agent 继续等，之后从托盘「待处理的确认」唤回
 
-超时未决策一律落回**拒绝/取消**，手动关窗则回退终端原生询问——不会替你放行。
+弹窗会等你 **1 小时**（`POMODORO_TIMEOUT_S` 可调）；到点未决策、或你关窗、或被顶掉，一律回退
+**终端原生询问**，绝不静默放行。等待链路是三层嵌套的（番茄钟兜底 3600s < hook 等网关 3900s <
+宿主 hook timeout 4200s），顺序乱了就会被宿主提前掐掉——详见
+[Agent 集成指南](docs/agent-hooks.md#三层超时谁先到点谁决定结局)。
+
+## 🧠 与 agent 长期记忆的关系
+
+番茄钟**不自建记忆 / 检索 / 存储层**，也不与外部服务打通。长期记忆（偏好依据、踩坑解法、
+项目约定）交给 agent 自己的记忆服务（如 OpenViking）：给它一段提示词，让它自己读、自己写，
+本项目**一行代码都不参与**。
+
+> 有意不做的三件事：① 不在番茄钟里自建存储 / 检索 / 记忆层；
+> ② 不做「专注结束自动写记忆」的开关 —— 那会让番茄钟反向依赖外部服务；
+> ③ 不做导出 / 推送 —— 番茄钟对记忆服务的依赖数恒为 0。
+> 详见 [长期记忆交给 OpenViking](docs/openviking-memory-prompt.md)。
 
 **一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点 **一键安装**，配置直接写好（原文件自动备份），面板上会告诉你写了哪些文件、有哪些注意事项；**装失败也不用慌**，面板会给出一模一样的命令行让你复制到终端执行。
 
@@ -86,7 +101,9 @@ npm start
 node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
 ```
 
-也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，所以审批挂 `PreToolUse`；且 VS Code **会忽略 matcher**，只拦高风险工具的判断在脚本里做）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，审批同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，所以先用它收窄）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 只有 `~/.codex/config.toml` 的 `notify`（回合结束通知，无弹窗审批）。
+也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，所以审批挂 `PreToolUse`；且 VS Code **会忽略 matcher**，只拦高风险工具的判断在脚本里做）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，审批同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，所以先用它收窄）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 在 `~/.codex/hooks.json`（12 个事件，审批走它自己的 `PermissionRequest` —— 该事件**只在 Codex 本来就要问用户时触发**，比挂在 `PreToolUse` 上精确得多）。
+
+> **Codex 有个反直觉的坑**：它的 `PreToolUse` 只强制执行 `permissionDecision:"deny"`，`"allow"` / `"ask"` 都是「被解析但不生效」。所以番茄钟**不在 Codex 的 `PreToolUse` 上弹窗**（点了「允许」也传不回去，只会被宿主的审批流程再问一次）；审批一律走 `PermissionRequest`。同理 `updatedPermissions` / `updatedInput` / `interrupt` 在 Codex 上会让整条答复 **fail closed**，「始终允许」改由番茄钟本地规则落盘实现。细节见 [`docs/agent-hooks.md`](docs/agent-hooks.md#codex-cli)。
 
 > 挂 `PreToolUse` 的两家（VS Code / Trae）默认**跟随宿主自己的自动允许设置**：读宿主的自动批准配置，命中就不弹窗、也不回决策，交回宿主原本的策略 —— 免得你已经设了自动运行还被反复打断。想查当前判定用 `node pomodoro-hook.js host-perms --source vscode --command "ls -la"`，想关掉跟随设 `POMODORO_RESPECT_HOST_AUTO=0`。细节见 [`docs/agent-hooks.md`](docs/agent-hooks.md#跟不跟随宿主的自动允许)。
 
@@ -160,7 +177,7 @@ pomodoro-fluent/
 │   ├── icon.png         # 应用/窗口图标
 │   └── tray.png         # 托盘图标模板
 ├── scripts/             # 打包辅助脚本（afterPack）
-├── docs/                # 截图与文档（agent-hooks.md）
+├── docs/                # 截图与文档（agent-hooks / openviking-memory-prompt）
 └── renderer/            # 界面
     ├── index.html       # 主窗口
     ├── styles.css       # 主界面样式（Win11 Fluent）

@@ -921,3 +921,7 @@ body.dock-bottom .dock-fill {
   background: linear-gradient(90deg, var(--ring-grad-1), var(--ring-grad-2));
   transition: width 1s linear;
 }
+
+/* ============================================================
+   Agent 网关面板（设置抽屉内）
+   ============================================================ */

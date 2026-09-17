@@ -525,6 +525,25 @@ html, body {
 }
 .notify-action.danger:hover { background: rgba(255, 99, 99, 0.24); }
 
+/* ---------- 暂时收起（仅交互窗） ---------- */
+.notify-holdrow {
+  padding: 0 20px 16px;
+  text-align: right;
+}
+/* 收起链接跟按钮同属一个动作区，把按钮行的底部留白收回来 */
+.notify-card.has-hold .notify-actions { padding-bottom: 6px; }
+.notify-hold {
+  border: 0;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.5);
+  font-size: 12px;
+  font-family: inherit;
+  cursor: pointer;
+  padding: 2px 0;
+  transition: color 0.15s;
+}
+.notify-hold:hover { color: rgba(255, 255, 255, 0.85); }
+
 /* ---------- 关闭按钮 ---------- */
 .notify-close {
   position: absolute;

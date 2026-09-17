@@ -35,6 +35,10 @@ const gateway = createGateway({
     const id = payload.id;
     if (payload.title === '[timeout-probe]') return; // 该用例故意不回应，验证超时兜底
     if (holdInteraction) return;                     // 同上，走 hook CLI 的真实超时路径
+    // 「暂时收起」用例自己控制答复时机（先 hold、再 reopen、最后作答）；
+    // [after-hold] 也必须放行 —— 否则会被下面 30ms 的自动应答抢先 resolve，
+    // 用例在 `await holdReq` 之后就找不到它了（竞态，实测会 flaky）。
+    if (/^\[(hold|after-hold)/.test(String(payload.title || ''))) return;
     if (!id) return; // 纯通知，无需回应
     if (payload.kind === 'permission') {
       setTimeout(() => gateway.resolveInteraction(id, { action: plan.permission, answers: {}, text: plan.text }, 'user'), 30);
@@ -67,6 +71,23 @@ let failed = 0;
 function ok(name, cond, extra) {
   if (cond) { passed++; console.log(`  PASS ${name}`); }
   else { failed++; console.log(`  FAIL ${name}${extra ? `\n       ${JSON.stringify(extra)}` : ''}`); }
+}
+
+// 等一个条件成立（轮询式，避免依赖固定 sleep）
+function waitFor(cond, ms = 2000) {
+  const t0 = Date.now();
+  return new Promise((resolve) => {
+    const tick = () => {
+      if (cond() || Date.now() - t0 > ms) resolve();
+      else setTimeout(tick, 20);
+    };
+    tick();
+  });
+}
+
+// 取 pending 里标题匹配的那条
+function pendingByTitle(title) {
+  return gateway.listPending().find((p) => p.title === title) || null;
 }
 
 function token() {
@@ -219,6 +240,59 @@ async function run() {
   });
   ok('ask 超时 → 落回 cancel（不替用户作答）',
     askTimeout.decidedBy === 'timeout' && askTimeout.action === 'cancel', askTimeout);
+
+  console.log('\n[1.5] 「暂时收起」（hold）与唤回');
+
+  // 收起：只收窗口，不结束交互——HTTP 请求继续挂着
+  const holdReq = post('/api/interaction', {
+    kind: 'permission', title: '[hold-probe]', message: '允许 npm test？',
+    permission: { tool: 'Bash', rule: 'npm test', canAlways: true },
+    timeoutMs: 60000,
+  });
+  await waitFor(() => !!pendingByTitle('[hold-probe]'));
+  const hp = pendingByTitle('[hold-probe]');
+  ok('交互已挂起在 pending 列表（state=active）', !!hp && hp.state === 'active', hp);
+
+  const held = hp ? gateway.holdInteraction(hp.id) : null;
+  ok('hold → 标记 held 并返回摘要', !!held && held.state === 'held' && held.kind === 'permission', held);
+  ok('hold → 同一 id 仍在 pending（没被 resolve）',
+    !!pendingByTitle('[hold-probe]') && pendingByTitle('[hold-probe]').state === 'held',
+    gateway.listPending());
+  ok('hold → 摘要带上了弹窗标题与工具',
+    !!held && held.title === '[hold-probe]' && held.tool === 'Bash', held);
+  ok('重复 hold 幂等（第二次返回 null）', hp && gateway.holdInteraction(hp.id) === null);
+
+  // 收起期间来新交互：held 的不能被顶掉
+  const afterReq = post('/api/interaction', {
+    kind: 'permission', title: '[after-hold]', permission: { tool: 'Write', canAlways: false },
+    timeoutMs: 60000,
+  });
+  await waitFor(() => !!pendingByTitle('[after-hold]'));
+  ok('新弹窗不顶掉已收起的交互',
+    !!pendingByTitle('[hold-probe]') && pendingByTitle('[hold-probe]').state === 'held',
+    gateway.listPending());
+
+  // 唤回：拿回原 payload，状态回到 active
+  const revived = hp ? gateway.reopenInteraction(hp.id) : null;
+  ok('reopen → 拿回原 payload 且状态回 active',
+    !!revived && revived.id === hp.id && revived.title === '[hold-probe]'
+      && !!pendingByTitle('[hold-probe]') && pendingByTitle('[hold-probe]').state === 'active',
+    revived);
+  ok('reopen 不存在的 id → null', gateway.reopenInteraction('no-such-id') === null);
+  ok('reopen 已经 active 的 → null（不重复弹）',
+    hp && gateway.reopenInteraction(hp.id) === null);
+
+  // 收尾：两条都答掉，别留挂起交互（后面有用例检查泄漏）
+  gateway.resolveInteraction(hp.id, { action: 'allow', answers: {}, text: '' }, 'user');
+  const h1 = await holdReq;
+  ok('唤回答复 → decidedBy=user 且真拿到决策',
+    h1.decidedBy === 'user' && h1.action === 'allow', h1);
+
+  const ap = pendingByTitle('[after-hold]');
+  gateway.resolveInteraction(ap.id, { action: 'deny', answers: {}, text: '' }, 'user');
+  const h2 = await afterReq;
+  ok('被顶掉场景下的交互仍可正常作答', h2.decidedBy === 'user' && h2.action === 'deny', h2);
+  ok('收尾后 pending 已清空', gateway.listPending().length === 0, gateway.listPending());
 
   console.log('\n[2] ZCode / Claude Code hook 协议（真跑 CLI）');
 
@@ -856,6 +930,124 @@ async function run() {
   }, ['codex-notify']);
   ok('Codex notify(agent-turn-complete) → 静默上报', res.out.trim() === '', res);
 
+  console.log('\n[2.95] Codex（审批只走 PermissionRequest）');
+
+  // Codex 的 PreToolUse 只强制执行 permissionDecision:"deny"，allow / ask 都是「被解析
+  // 但不生效」（实机 bundle 原话：unsupported permissionDecision:allow / :ask）。所以在
+  // PreToolUse 上弹窗是错的：用户点「允许」传不回去，宿主走自己的审批 → PermissionRequest
+  // → 又弹一次。这里断言：即便工具是 Bash（在高风险名单内）、即便显式开了全量确认，
+  // 也绝不在此弹窗、不回决策。
+  const codexBase = {
+    session_id: `smoke-codex-${process.pid}`,
+    turn_id: `turn-${process.pid}`,
+    model: 'gpt-5.3-codex',
+    permission_mode: 'default',
+  };
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    ...codexBase,
+    tool_name: 'Bash',
+    tool_input: { command: 'rm -rf dist' },
+    tool_use_id: 'call_pre',
+  }, ['--source', 'codex']);
+  out = parseOut(res.out);
+  ok('Codex PreToolUse → 不弹窗、不回决策（allow/ask 在 Codex 上不生效）',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PreToolUse',
+    ...codexBase,
+    tool_name: 'Bash',
+    tool_input: { command: 'rm -rf dist' },
+    tool_use_id: 'call_pre2',
+  }, ['--source', 'codex'], { POMODORO_CONFIRM_PRETOOL: '1' });
+  out = parseOut(res.out);
+  ok('Codex PreToolUse 即使开了全量确认也不拦（拦了也传不回决策，只会弹两次）',
+    popups.length === popupCount && (!out || !out.hookSpecificOutput), res);
+
+  // 审批正解：PermissionRequest —— 只在「Codex 本来就要问」时才触发
+  plan = { permission: 'allow', text: '' };
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PermissionRequest',
+    ...codexBase,
+    trigger: 'untrusted_command',
+    tool_name: 'Bash',
+    tool_input: { command: `npm run codex-${process.pid}` },
+    tool_use_id: 'call_1',
+  }, ['--source', 'codex']);
+  out = parseOut(res.out);
+  ok('Codex PermissionRequest 允许 → hookSpecificOutput.decision.behavior=allow',
+    popups.length === popupCount + 1 && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.decision
+      && out.hookSpecificOutput.decision.behavior === 'allow', res);
+  ok('Codex 答复里没有 updatedPermissions / updatedInput / interrupt（不支持字段会 fail closed）',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.decision
+      && !('updatedPermissions' in out.hookSpecificOutput.decision)
+      && !('updatedInput' in out.hookSpecificOutput.decision)
+      && !('interrupt' in out.hookSpecificOutput.decision), out && out.hookSpecificOutput.decision);
+  ok('Codex 上下文 → 来源标为 codex',
+    lastPopup && lastPopup.context && lastPopup.context.agent === 'codex', lastPopup && lastPopup.context);
+
+  // 拒绝：behavior=deny + 带原因（Codex 的 deny 会把 message 显示给用户）
+  plan = { permission: 'deny', text: '这条命令先不动' };
+  res = await runHook({
+    hook_event_name: 'PermissionRequest',
+    ...codexBase,
+    tool_name: 'Bash',
+    tool_input: { command: `npm run codex-${process.pid}-deny` },
+    tool_use_id: 'call_2',
+  }, ['--source', 'codex']);
+  out = parseOut(res.out);
+  ok('Codex PermissionRequest 拒绝 → behavior=deny + 带上拒绝原因',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.decision
+      && out.hookSpecificOutput.decision.behavior === 'deny'
+      && /这条命令先不动/.test(out.hookSpecificOutput.decision.message || ''), res);
+
+  // 「始终允许」：Codex 落不了盘规则 → 靠番茄钟本地规则兜住；答复里同样不能带 updatedPermissions
+  const codexRule = `npm run codex-always-${process.pid}`;
+  plan = { permission: 'allow-always', text: '' };
+  res = await runHook({
+    hook_event_name: 'PermissionRequest',
+    ...codexBase,
+    tool_name: 'Bash',
+    tool_input: { command: codexRule },
+    tool_use_id: 'call_3',
+  }, ['--source', 'codex']);
+  out = parseOut(res.out);
+  ok('Codex「始终允许」→ 仍不带 updatedPermissions（靠本地规则落地）',
+    out && out.hookSpecificOutput && out.hookSpecificOutput.decision
+      && out.hookSpecificOutput.decision.behavior === 'allow'
+      && !('updatedPermissions' in out.hookSpecificOutput.decision), res);
+
+  popupCount = popups.length;
+  res = await runHook({
+    hook_event_name: 'PermissionRequest',
+    ...codexBase,
+    tool_name: 'Bash',
+    tool_input: { command: codexRule },
+    tool_use_id: 'call_4',
+  }, ['--source', 'codex']);
+  out = parseOut(res.out);
+  ok('Codex 本地「始终允许」规则生效 → 第二次不再弹窗',
+    popups.length === popupCount && out && out.hookSpecificOutput
+      && out.hookSpecificOutput.decision.behavior === 'allow', res);
+
+  // 来源自动识别：不带 --source 时靠 payload 的 turn_id 认出 Codex
+  plan = { permission: 'allow', text: '' };
+  res = await runHook({
+    hook_event_name: 'PermissionRequest',
+    session_id: `smoke-codex-auto-${process.pid}`,
+    turn_id: `turn-auto-${process.pid}`,
+    tool_name: 'Bash',
+    tool_input: { command: `npm run codex-auto-${process.pid}` },
+    tool_use_id: 'call_5',
+  });
+  ok('不带 --source 也能靠 turn_id 认出 Codex',
+    !!lastPopup && lastPopup.source === 'codex', lastPopup && lastPopup.source);
+
   console.log('\n[3] OpenCode 子命令');
 
   plan = { permission: 'allow' };
@@ -893,10 +1085,10 @@ async function run() {
   try { traeCfg = JSON.parse(fs.readFileSync(traeFile, 'utf8')); } catch (e) { /* 断言会失败 */ }
   ok('install --agent trae 写出 ~/.trae-cn/hooks.json（退出码 0）',
     res.out.includes('已写入') && traeCfg && traeCfg.version === 1, res);
-  ok('install 写出的 PreToolUse 带 matcher + timeout=600（秒）',
+  ok('install 写出的 PreToolUse 带 matcher + timeout=4200（秒）',
     traeCfg && traeCfg.hooks && traeCfg.hooks.PreToolUse
       && /RunCommand/.test(traeCfg.hooks.PreToolUse[0].matcher || '')
-      && traeCfg.hooks.PreToolUse[0].hooks[0].timeout === 600, traeCfg && traeCfg.hooks);
+      && traeCfg.hooks.PreToolUse[0].hooks[0].timeout === 4200, traeCfg && traeCfg.hooks);
 
   // VS Code 那边要写 timeout（不是 timeoutSec），且覆盖 8 个事件
   res = await runHook({}, ['install', '--agent', 'vscode'], homeEnv);
@@ -905,8 +1097,8 @@ async function run() {
   try { vsCfg = JSON.parse(fs.readFileSync(vsFile, 'utf8')); } catch (e) { /* 断言会失败 */ }
   ok('install --agent vscode 写出 ~/.copilot/hooks/pomodoro.json',
     vsCfg && vsCfg.hooks && Object.keys(vsCfg.hooks).length === 8, vsCfg && vsCfg.hooks);
-  ok('VS Code 配置用 timeout（不是 timeoutSec）且 PreToolUse=600',
-    vsCfg && vsCfg.hooks.PreToolUse[0].timeout === 600
+  ok('VS Code 配置用 timeout（不是 timeoutSec）且 PreToolUse=4200',
+    vsCfg && vsCfg.hooks.PreToolUse[0].timeout === 4200
       && !('timeoutSec' in vsCfg.hooks.PreToolUse[0]), vsCfg && vsCfg.hooks.PreToolUse[0]);
 
   // 重复安装要幂等：同一条目不重复追加
@@ -926,6 +1118,49 @@ async function run() {
   ok('--clean 清掉指向其它副本的旧条目（只剩当前安装路径）',
     traeCleaned.hooks.PreToolUse.length === 1
       && !/old/.test(JSON.stringify(traeCleaned.hooks.PreToolUse)), traeCleaned.hooks.PreToolUse);
+
+  // Codex：hooks.json 覆盖 12 个事件。审批在 PermissionRequest（Codex 唯一认 allow/deny
+  // 的地方）→ 必须等用户点弹窗；PreToolUse 只上报活动 → matcher 收窄、timeout 保持短。
+  res = await runHook({}, ['install', '--agent', 'codex'], homeEnv);
+  const codexFile = path.join(fakeHome, '.codex', 'hooks.json');
+  let codexCfg = null;
+  try { codexCfg = JSON.parse(fs.readFileSync(codexFile, 'utf8')); } catch (e) { /* 断言会失败 */ }
+  ok('install --agent codex 写出 ~/.codex/hooks.json（12 个事件）',
+    res.out.includes('已写入') && codexCfg && codexCfg.hooks
+      && Object.keys(codexCfg.hooks).length === 12,
+    codexCfg && codexCfg.hooks ? Object.keys(codexCfg.hooks) : codexCfg);
+  ok('Codex PermissionRequest 用 timeout=4200（要等用户点弹窗）',
+    codexCfg && codexCfg.hooks.PermissionRequest
+      && codexCfg.hooks.PermissionRequest[0].hooks[0].timeout === 4200
+      && /--source codex/.test(codexCfg.hooks.PermissionRequest[0].hooks[0].command || ''),
+    codexCfg && codexCfg.hooks.PermissionRequest);
+  ok('Codex PreToolUse 只上报 → matcher 收窄 + timeout=30（不阻塞等弹窗）',
+    codexCfg && codexCfg.hooks.PreToolUse[0].matcher === 'Bash|apply_patch|Edit|Write|mcp__.*'
+      && codexCfg.hooks.PreToolUse[0].hooks[0].timeout === 30, codexCfg && codexCfg.hooks.PreToolUse);
+  ok('Codex 不给 UserPromptSubmit / Stop 写 matcher（这两个事件忽略 matcher）',
+    codexCfg && codexCfg.hooks.UserPromptSubmit[0].matcher === undefined
+      && codexCfg.hooks.Stop[0].matcher === undefined, codexCfg && codexCfg.hooks);
+
+  // notify 是更老的通道，用户可能已经把它指向别的工具（如 codex-computer-use）
+  // → 默认绝不能覆盖；只有显式 --with-notify 才动
+  const codexCfgToml = path.join(fakeHome, '.codex', 'config.toml');
+  fs.mkdirSync(path.dirname(codexCfgToml), { recursive: true });
+  const notifyOrigin = 'notify = ["some-other-tool.exe", "turn-ended"]';
+  fs.writeFileSync(codexCfgToml, `model = "gpt-5.3-codex"\n${notifyOrigin}\n`);
+  await runHook({}, ['install', '--agent', 'codex'], homeEnv);
+  ok('install --agent codex 不动 config.toml 的 notify（避免覆盖已有通知工具）',
+    fs.readFileSync(codexCfgToml, 'utf8').includes(notifyOrigin),
+    fs.readFileSync(codexCfgToml, 'utf8'));
+  await runHook({}, ['install', '--agent', 'codex', '--with-notify'], homeEnv);
+  ok('--with-notify 才改写 notify（并备份原文件）',
+    /pomodoro-hook\.js/.test(fs.readFileSync(codexCfgToml, 'utf8'))
+      && fs.existsSync(`${codexCfgToml}.pomodoro.bak`), fs.readFileSync(codexCfgToml, 'utf8'));
+
+  // 用户把 hooks 关掉时（[features] hooks = false）必须明确告警，否则「配好了不弹窗」查不出来
+  fs.writeFileSync(codexCfgToml, '[features]\nhooks = false\n');
+  res = await runHook({}, ['install', '--agent', 'codex'], homeEnv);
+  ok('config.toml 里 hooks 被关掉 → 安装时明确告警',
+    /hooks 被关了/.test(res.out || ''), res.out);
 
   // 未知宿主必须非零退出 —— 前端「一键安装」靠退出码判断成败，不能误报成功
   res = await runHook({}, ['install', '--agent', 'no-such-agent'], homeEnv);

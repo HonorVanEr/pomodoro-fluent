@@ -1,6 +1,6 @@
 'use strict';
 
-const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, shell, Notification, clipboard } = require('electron');
+const { app, BrowserWindow, Tray, Menu, nativeImage, ipcMain, screen, Notification, clipboard } = require('electron');
 const path = require('path');
 const fs = require('fs');
 const os = require('os');
@@ -395,10 +395,61 @@ function createTray() {
   });
 }
 
+// ---- 待处理的「暂时收起」确认 ----
+// 弹窗收起后托盘是唯一的唤回入口，所以它必须排在菜单最上面。
+function heldPending() {
+  if (!gateway) return [];
+  try { return gateway.listPending().filter((p) => p.state === 'held'); }
+  catch (e) { return []; }
+}
+
+function pendingMenuLabel(p) {
+  const kindText = p.kind === 'permission' ? '权限' : (p.kind === 'ask' ? '提问' : '确认');
+  const what = String(p.tool || p.title || p.message || '').replace(/\s+/g, ' ').trim();
+  const short = what.length > 36 ? `${what.slice(0, 35)}…` : what;
+  return short ? `${kindText} · ${short}` : kindText;
+}
+
+// 把用户收起的那条重新弹出来（不传 id 时取最早收起的）
+function reopenHeld(id) {
+  if (!gateway) return;
+  const held = heldPending();
+  const target = id || (held[0] && held[0].id);
+  if (!target) return;
+  // 可能已经在收起期间被兜底收走了，拿不到就不再弹
+  const data = gateway.reopenInteraction(target);
+  if (data) showNotify(data);
+  refreshPendingTray();
+}
+
+// 待处理数量变化时刷新托盘（菜单重建开销大，但这里本来就低频）
+function refreshPendingTray() {
+  if (!tray) return;
+  const held = heldPending();
+  rebuildTrayMenu({ running: traySync.running });
+  const base = traySync.timeText ? `番茄钟 ${traySync.timeText}` : '番茄钟';
+  tray.setToolTip(held.length ? `${base} · ${held.length} 条确认待处理` : base);
+}
+
 function rebuildTrayMenu(state) {
   const s = state || {};
   const running = !!s.running;
-  const menu = Menu.buildFromTemplate([
+  const held = heldPending();
+  const template = [];
+  if (held.length) {
+    template.push({
+      label: `待处理的确认（${held.length}）`,
+      click: () => reopenHeld(null),
+    });
+    if (held.length > 1) {
+      template.push({
+        label: '选择要处理的…',
+        submenu: held.map((p) => ({ label: pendingMenuLabel(p), click: () => reopenHeld(p.id) })),
+      });
+    }
+    template.push({ type: 'separator' });
+  }
+  template.push(
     {
       label: '显示主窗口',
       click: () => revealMainWindow(),
@@ -424,7 +475,8 @@ function rebuildTrayMenu(state) {
         app.quit();
       },
     },
-  ]);
+  );
+  const menu = Menu.buildFromTemplate(template);
   if (tray) tray.setContextMenu(menu);
 }
 
@@ -747,7 +799,7 @@ ipcMain.on('tray:update', (_e, state) => {
 });
 
 ipcMain.on('notify:close', (e, id) => {
-  // 用户手动关闭弹窗：只把该弹窗对应的交互按 dismissed 兜底返回
+  // 右上角 X（closeNotify）＝「交给终端」：把该交互按 dismissed 兜底返回
   // （action=null → 调用方回退终端原生询问，不替用户做决定）
   if (gateway) {
     if (id) gateway.resolveInteraction(id, { action: null, answers: {}, text: '' }, 'dismissed');
@@ -757,6 +809,22 @@ ipcMain.on('notify:close', (e, id) => {
   // 不能误关当前正在展示的新弹窗
   const win = BrowserWindow.fromWebContents(e.sender);
   if (win && !win.isDestroyed()) win.close();
+  refreshPendingTray();
+});
+
+// 「暂时收起」：只收起窗口，**不 resolve** —— 网关那边 HTTP 请求继续挂着，
+// 等用户从托盘重新唤回再作答。注意这与「交给终端」是两种不同的关闭方式。
+ipcMain.on('interaction:hold', (e, payload) => {
+  const p = payload || {};
+  if (gateway && p.id) gateway.holdInteraction(p.id);
+  const win = BrowserWindow.fromWebContents(e.sender);
+  if (win && !win.isDestroyed()) win.close();
+  refreshPendingTray();
+});
+
+// 从托盘唤回收起的确认（不传 id 时取最早收起的那条）
+ipcMain.on('interaction:reopen', (_e, payload) => {
+  reopenHeld((payload && payload.id) || null);
 });
 
 // ---------------------------------------------------------------------------
@@ -944,6 +1012,8 @@ function startGateway() {
       if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('state:agent-activity', a);
     },
     getTimerState: () => lastTimerState,
+    // 待处理交互集变化 → 立即刷新托盘入口（含被兜底收走时清掉死条目）
+    onPendingChange: () => refreshPendingTray(),
     getUserDataPath: () => app.getPath('userData'),
     log: (...args) => console.log(...args),
   });
@@ -988,6 +1058,7 @@ ipcMain.on('interaction:respond', (e, payload) => {
   // 本地弹窗（没有挂起交互）也得关，否则只能等自动关闭
   const win = BrowserWindow.fromWebContents(e.sender);
   if (win && !win.isDestroyed()) win.close();
+  refreshPendingTray();
 });
 
 // 旧接口兼容：只有 action 的确认

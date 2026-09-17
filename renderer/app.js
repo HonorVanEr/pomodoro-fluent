@@ -402,11 +402,11 @@ const PomodoroApp = (() => {
       return JSON.stringify({
         hooks: {
           enabled: true,
-          timeoutMs: 600000,
+          timeoutMs: 4200000,
           events: {
-            PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 600000 }] }],
+            PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 4200000 }] }],
             // AskUserQuestion：ZCode 会同时触发 PreToolUse 与 PermissionRequest，两个都接上
-            PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 600000 }] }],
+            PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('zcode'), timeoutMs: 4200000 }] }],
             Stop: [{ hooks: [{ type: 'command', command: cmd('zcode') }] }],
             PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode') }] }],
             PostToolUseFailure: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('zcode') }] }],
@@ -424,10 +424,11 @@ const PomodoroApp = (() => {
       // 只有 8 个事件（无 PermissionRequest / Notification），审批走 PreToolUse；
       // VS Code 会忽略 matcher，只拦高风险工具的判断在 CLI 里做。
       // timeout 单位是秒、默认只有 30 → 要等弹窗就必须显式调大。
+      // 4200s 是给「三层嵌套」留的余量：番茄钟兜底 3600s → hook 等网关 3900s → 宿主 4200s。
       return JSON.stringify({
         version: 1,
         hooks: {
-          PreToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 600 }],
+          PreToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 4200 }],
           PostToolUse: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
           SessionStart: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
           UserPromptSubmit: [{ type: 'command', command: cmd('vscode'), timeout: 30 }],
@@ -447,7 +448,7 @@ const PomodoroApp = (() => {
         hooks: {
           PreToolUse: [{
             matcher: 'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile',
-            hooks: [{ type: 'command', command: cmd('trae'), timeout: 600 }],
+            hooks: [{ type: 'command', command: cmd('trae'), timeout: 4200 }],
           }],
           Notification: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
           Stop: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
@@ -462,9 +463,9 @@ const PomodoroApp = (() => {
       return JSON.stringify({
         version: 1,
         hooks: {
-          beforeShellExecution: [{ command: cmd('cursor'), timeout: 600 }],
-          preToolUse: [{ command: cmd('cursor'), timeout: 600 }],
-          beforeMCPExecution: [{ command: cmd('cursor'), timeout: 600 }],
+          beforeShellExecution: [{ command: cmd('cursor'), timeout: 4200 }],
+          preToolUse: [{ command: cmd('cursor'), timeout: 4200 }],
+          beforeMCPExecution: [{ command: cmd('cursor'), timeout: 4200 }],
           beforeSubmitPrompt: [{ command: cmd('cursor') }],
           afterFileEdit: [{ command: cmd('cursor') }],
           afterShellExecution: [{ command: cmd('cursor') }],
@@ -474,17 +475,31 @@ const PomodoroApp = (() => {
       }, null, 2);
     }
     if (agent === 'codex') {
-      // Codex 只有 notify：回合结束回调一次（无权限决策通道）
-      return [
-        '# ~/.codex/config.toml',
-        `notify = ["node", "${(hookPath || '').replace(/\\/g, '\\\\')}", "codex-notify"]`,
-      ].join('\n');
+      // Codex：hooks 走 ~/.codex/hooks.json（用户级）。审批在 PermissionRequest 上，
+      // PreToolUse 只上报活动 —— 它的 allow/ask 在 Codex 上不生效，只有 deny 有效。
+      // 老的 notify（config.toml）不再由 install 改写，避免覆盖已有的通知工具。
+      return JSON.stringify({
+        hooks: {
+          PermissionRequest: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 4200 }] }],
+          PreToolUse: [{ matcher: 'Bash|apply_patch|Edit|Write|mcp__.*', hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          PostToolUse: [{ matcher: 'Bash|apply_patch|Edit|Write|mcp__.*', hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          UserPromptSubmit: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          Stop: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          SubagentStart: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          SubagentStop: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          SessionStart: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          SessionEnd: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          PreCompact: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          PostCompact: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+          Interrupt: [{ hooks: [{ type: 'command', command: cmd('codex'), timeout: 30 }] }],
+        },
+      }, null, 2);
     }
     if (agent === 'qwen') {
       return JSON.stringify({
         hooks: {
           Notification: [{ hooks: [{ type: 'command', command: cmd('qwen') }] }],
-          PreToolUse: [{ matcher: 'AskUserQuestion|askQuestions', hooks: [{ type: 'command', command: cmd('qwen'), timeout: 600 }] }],
+          PreToolUse: [{ matcher: 'AskUserQuestion|askQuestions', hooks: [{ type: 'command', command: cmd('qwen'), timeout: 4200 }] }],
           Stop: [{ hooks: [{ type: 'command', command: cmd('qwen') }] }],
           PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('qwen') }] }],
         },
@@ -493,8 +508,8 @@ const PomodoroApp = (() => {
     return JSON.stringify({
       hooks: {
         Notification: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
-        PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 600 }] }],
-        PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 600 }] }],
+        PermissionRequest: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 4200 }] }],
+        PreToolUse: [{ matcher: 'AskUserQuestion', hooks: [{ type: 'command', command: cmd('claude-code'), timeout: 4200 }] }],
         Stop: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
         SubagentStop: [{ hooks: [{ type: 'command', command: cmd('claude-code') }] }],
         PostToolUse: [{ matcher: '*', hooks: [{ type: 'command', command: cmd('claude-code') }] }],
@@ -624,7 +639,7 @@ const PomodoroApp = (() => {
       render({ instant: true });
     });
 
-    // 跳过
+    // 跳过：跳过的番茄不算数，不记流水
     dom.btnSkip.addEventListener('click', () => {
       stopTimer();
       // 跳过当前阶段，直接完成（setPhase 内部已渲染）

@@ -40,7 +40,7 @@ const TIMER_FLAVORS = new Set(['work', 'break', 'longBreak', 'idle', 'custom']);
 // 纯通知默认 5s，带 timeoutMs 的（如阶段结束提醒）按给定值停留更久
 const DEFAULT_NOTIFY_MS = 5000;
 const MIN_NOTIFY_MS = 3000;
-const MAX_NOTIFY_MS = 600000;
+const MAX_NOTIFY_MS = 600000;   // 仅约束纯通知的停留上限，交互窗不套这个天花板
 
 const ICONS = {
   work: `<svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -152,6 +152,36 @@ function respond(result) {
 
 function dismiss() {
   if (api && api.closeNotify) api.closeNotify(POPUP_ID);
+}
+
+// ---------------- 暂时收起（hold）----------------
+// 与「交给终端」（右上角 X → closeNotify → dismissed）区分：收起**不结束**这次交互，
+// 网关那边的 HTTP 请求继续挂着，用户可从托盘把它重新调出来作答。
+function hold() {
+  if (state.submitted) return;
+  state.submitted = true;
+  // 这里**不能再调 dismiss()**：closeNotify 会把它按 dismissed 收尾，
+  // 那就退化成「交给终端」了。关窗由主进程在 interaction:hold 里做。
+  if (api && api.holdInteraction) api.holdInteraction(POPUP_ID);
+}
+
+function renderHoldRow() {
+  const row = el('notifyHoldRow');
+  if (!row) return;
+  const btn = document.createElement('button');
+  btn.className = 'notify-hold';
+  btn.type = 'button';
+  btn.textContent = '暂时收起，稍后从托盘处理';
+  btn.title = '收起后 agent 继续等你，点托盘图标的「待处理的确认」可以再打开';
+  btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    hold();
+  });
+  row.innerHTML = '';
+  row.appendChild(btn);
+  row.hidden = false;
+  const card = el('notify-card');
+  if (card) card.classList.add('has-hold');
 }
 
 // ---------------- 自动关闭（鼠标悬停时暂停）----------------
@@ -504,9 +534,12 @@ function render(payload) {
 
   el('notifyIcon').innerHTML = ICONS[state.flavor] || ICONS.agent;
 
-  // 进度条：交互窗为决策剩余时间；通知默认 5s，显式带 timeoutMs 时按更长停留
+  // 进度条：交互窗为决策剩余时间；通知默认 5s，显式带 timeoutMs 时按更长停留。
+  // 交互窗**不能**套 MAX_NOTIFY_MS 这个天花板：网关兜底可能长达 1 小时，
+  // 若这里 10 分钟就自动关窗，closeNotify 会把交互按 dismissed 提前收尾，
+  // 网关的兜底就白设了。上限交给网关的 clampTimeout 统一决定。
   const durationMs = state.interactive
-    ? Math.min(Math.max(state.timeoutMs, 5000), MAX_NOTIFY_MS)
+    ? Math.max(state.timeoutMs, 5000)
     : (state.timeoutMs > 0
       ? Math.min(Math.max(state.timeoutMs, MIN_NOTIFY_MS), MAX_NOTIFY_MS)
       : DEFAULT_NOTIFY_MS);
@@ -518,6 +551,9 @@ function render(payload) {
     // notification / custom 带自定义按钮
     renderActions(p.actions, (id) => respond({ action: id, answers: {}, text: '' }));
   }
+
+  // 交互窗额外给一条「暂时收起」：与右上角 X（交给终端）是两种不同的收尾方式
+  if (state.interactive) renderHoldRow();
 
   // 走完倒计时自行关闭（网关侧会同时按 timeout 兜底；悬停可暂停，见 setAutoClosePaused）
   resumeAutoClose(durationMs);

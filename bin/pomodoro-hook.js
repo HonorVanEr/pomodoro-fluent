@@ -181,7 +181,10 @@ function cacheWrite(key, result) {
 const LOCAL_RULE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 // Trae 的 PreToolUse 支持 permissionDecision / updatedInput / additionalContext，
 // 但同样**没有** updatedPermissions —— 也靠本地规则落地
-const LOCAL_RULE_SOURCES = new Set(['vscode', 'trae', 'cursor']);
+// Codex 也不能回写「始终允许」：PermissionRequest 的 updatedPermissions 在它那里属
+// 「不支持的字段」，而且遇到不支持的字段会 **fail closed**（实机文案：
+// "PermissionRequest hook returned unsupported updatedPermissions"）→ 同样靠本地规则。
+const LOCAL_RULE_SOURCES = new Set(['vscode', 'trae', 'cursor', 'codex']);
 
 function localRuleFile() {
   return path.join(cacheDir(), 'always-allow.json');
@@ -432,13 +435,22 @@ function formatAnswerMap(map) {
 // ---------------------------------------------------------------------------
 // 网关调用
 // ---------------------------------------------------------------------------
+// 时间预算：三层必须嵌套，顺序不能乱
+//   网关兜底     POMODORO_TIMEOUT_S（默认 3600s）：到点回「未决策」，交还宿主原生询问
+//   hook 等网关  兜底 + WAIT_HTTP_MARGIN_MS：给往返与渲染留余量
+//   宿主超时     HOST_WAIT_*：必须排最后。宿主若先到点，它会直接杀掉 hook，
+//              那句「未决策」根本发不出去，宿主就按自己的审批设置走了（可能静默放行）
+const WAIT_HTTP_MARGIN_MS = 5 * 60 * 1000;
+const HOST_WAIT_SEC = 4200;          // 秒制宿主：VS Code / Trae / Cursor / Qwen / Claude Code
+const HOST_WAIT_MS = 4200 * 1000;    // 毫秒制宿主：ZCode
+
 function timeoutMs() {
-  const s = Math.min(Number(env.POMODORO_TIMEOUT_S) || 240, 590);
+  const s = Math.min(Number(env.POMODORO_TIMEOUT_S) || 3600, 7200);
   return Math.max(5, Math.round(s)) * 1000;
 }
 
 async function postInteraction(gw, body, ms) {
-  return request(gw.port, gw.token, 'POST', '/api/interaction', body, ms + 20000);
+  return request(gw.port, gw.token, 'POST', '/api/interaction', body, ms + WAIT_HTTP_MARGIN_MS);
 }
 
 async function postEvent(gw, body) {
@@ -504,6 +516,11 @@ function detectSource(payload) {
   if (payload && (payload.cursor_version || payload.conversation_id)) return 'cursor';
   // Trae 的 hook payload 会额外带 llm_tool_name 与 workspace_roots，可据此识别
   if (payload && (payload.llm_tool_name || (payload.workspace_roots && payload.tool_use_id))) return 'trae';
+  // Codex 的 hook payload 带 turn_id，PermissionRequest 还额外带 trigger。
+  // 注意：这里**故意不做 ~/.codex 目录探测** —— 装 Codex 的人往往同时装了别的宿主，
+  // 用「目录存在」猜来源会把 Claude Code 的调用误判成 codex。
+  // （install 生成的命令一律带 --source codex，这条只是手写配置时的兜底。）
+  if (payload && (payload.turn_id || payload.trigger)) return 'codex';
   try {
     if (fs.existsSync(path.join(os.homedir(), '.zcode'))) return 'zcode';
   } catch (e) { /* ignore */ }
@@ -532,6 +549,16 @@ function detectProtocol(payload) {
 // 工具名归一化后再比对：VS Code 用 run_in_terminal / create_file，Trae 用
 // RunCommand，Claude harness 里又是 Bash —— 归一化后一网打尽。
 const PRETOOL_APPROVAL_SOURCES = new Set(['vscode', 'trae']);
+
+// Codex（codex-cli 0.154.0 实测）：审批**只走 PermissionRequest**，不在 PreToolUse 上拦。
+// 依据是实机 bundle 里的原话 —— PreToolUse 只强制执行 deny，其余值都被解析但不生效：
+//   PreToolUse hook returned unsupported permissionDecision:allow
+//   PreToolUse hook returned unsupported permissionDecision:ask
+// 所以在 PreToolUse 上回 allow/ask 等于什么都没回，宿主照样走自己的审批 → 那次审批
+// 又会触发 PermissionRequest → 弹两次窗。而且 Codex 的 PermissionRequest 只在
+// 「Codex 本来就要问用户」时才触发（不需要审批的调用不跑），条件比 PreToolUse 精确得多，
+// 因此也不需要 VS Code / Trae 那套「跟随宿主自动允许」的猜测。
+const PERMISSION_EVENT_ONLY_SOURCES = new Set(['codex']);
 
 const VSCODE_APPROVE_DEFAULT = [
   // 执行命令 / 终端
@@ -888,6 +915,11 @@ function hostAutoPlan(source, tool, toolInput, cwd) {
 // 返回 { intercept, why, host } —— intercept=false 时**不输出任何决策**，
 // 让宿主按它自己的审批设置走
 function pretoolPlan(payload, source) {
+  // 这条必须排在最前（连 POMODORO_CONFIRM_PRETOOL 也拦不住）：Codex 的 PreToolUse
+  // 只认 deny，在这里弹窗拿到的「允许」根本传不回去，只会造成重复弹窗。
+  if (PERMISSION_EVENT_ONLY_SOURCES.has(String(source || ''))) {
+    return { intercept: false, why: 'Codex 的审批走 PermissionRequest（PreToolUse 的 allow/ask 不生效）' };
+  }
   if (flag('POMODORO_CONFIRM_PRETOOL', false) === true) {
     return { intercept: true, why: 'POMODORO_CONFIRM_PRETOOL=1（全量开启）' };
   }
@@ -1065,12 +1097,12 @@ async function handlePermission(payload, source, gw, context) {
     const updatedPermissions = buildPermissionUpdates(tool, toolInput, payload.permission_suggestions);
     localRuleAdd(source, tool, rule);   // 兜底：宿主不认 updatedPermissions 时也生效
     if (event === 'PermissionRequest') {
-      return {
-        hookSpecificOutput: {
-          hookEventName: 'PermissionRequest',
-          decision: { behavior: 'allow', message: '用户选择始终允许', updatedPermissions },
-        },
-      };
+      const decision = { behavior: 'allow', message: '用户选择始终允许（已记入番茄钟本地规则）' };
+      // Codex 遇到不支持的字段会 fail closed，绝不能把 updatedPermissions 塞给它
+      if (!PERMISSION_EVENT_ONLY_SOURCES.has(String(source || ''))) {
+        decision.updatedPermissions = updatedPermissions;
+      }
+      return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };
     }
     return {
       hookSpecificOutput: {
@@ -1095,6 +1127,10 @@ async function handlePermission(payload, source, gw, context) {
 // VS Code / Trae 都没有 PermissionRequest，PreToolUse 若「不做决策」，就会按宿主
 // 自己的审批设置走 —— 用户可能已经把终端命令设成免确认，等于被静默放行。
 // 所以这里显式回一个 ask，强制弹出原生确认：宁可多问一次，也不替他放行。
+//
+// Codex 相反：它有 PermissionRequest 兜底，且 PreToolUse 的 ask 本来就不被支持
+// （不生效 ＝ 等于什么都没回）→ 对 Codex 返回 null，让它走自己的审批流程，
+// 那条流程会触发 PermissionRequest，弹窗在那里接住。
 function preToolFallback(source, reason) {
   if (!PRETOOL_APPROVAL_SOURCES.has(String(source || ''))) return null;
   return {
@@ -1152,13 +1188,18 @@ async function runAncliMode(gw, payload) {
     SessionStart: { kind: 'session-start', source },
     SessionEnd: { kind: 'session-end', source },
     PreCompact: { kind: 'pre-compact', source },
+    PostCompact: { kind: 'post-compact', source },
+    Interrupt: { kind: 'interrupt', source },
     UserPromptSubmit: { kind: 'prompt', source },
   };
   const body = bodyByEvent[event];
   if (!body) return; // 未识别的事件：静默忽略
   if (event === 'Notification' && !body.message) body.message = 'Agent 需要你的确认';
   // 通知类也带上上下文：弹窗能显示是哪个任务、在动哪个工具
-  if (event === 'Notification' || event === 'Stop') body.context = context;
+  // UserPromptSubmit 必须带：工作报告靠 context.task 记下「这次让 agent 干什么」
+  if (event === 'Notification' || event === 'Stop' || event === 'UserPromptSubmit') {
+    body.context = context;
+  }
   // 注意：Stop 只上报，绝不输出 decision:"block" —— 那会阻止 agent 收尾，
   // 甚至把它拖进自动续跑的循环（VS Code 的 stop_hook_active 就是防这个的）
   await postEvent(gw, body);
@@ -1717,10 +1758,13 @@ function installAncliHooks(file, source, print) {
   const cfg = readJson(file);
   cfg.hooks = cfg.hooks || {};
   const h = hookCommandShell(source);
-  const withTimeout = (e) => ({ ...e, timeout: 600 });
+  const withTimeout = (e) => ({ ...e, timeout: HOST_WAIT_SEC });
   pushHook(cfg.hooks, 'Notification', { hooks: [{ ...h }] });
   pushHook(cfg.hooks, 'PermissionRequest', { matcher: '*', hooks: [withTimeout({ ...h })] });
   pushHook(cfg.hooks, 'PreToolUse', { matcher: 'AskUserQuestion|askQuestions|askQuestion', hooks: [withTimeout({ ...h })] });
+  // UserPromptSubmit：唯一携带「用户这次让 agent 干什么」的事件。
+  // 工作报告的任务内容就来自这里（payload.prompt）——漏了它，任务名永远是空的。
+  pushHook(cfg.hooks, 'UserPromptSubmit', { hooks: [{ ...h }] });
   pushHook(cfg.hooks, 'Stop', { hooks: [{ ...h }] });
   pushHook(cfg.hooks, 'SubagentStop', { hooks: [{ ...h }] });
   pushHook(cfg.hooks, 'PostToolUse', { matcher: '*', hooks: [{ ...h }] });
@@ -1741,7 +1785,7 @@ function installQwen(print) {
 // （SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact /
 //   SubagentStart / SubagentStop / Stop），**没有** PermissionRequest 与 Notification。
 // 用户级放 ~/.copilot/hooks/*.json；条目用 timeout（单位：秒，默认 30）。
-// 长轮询等待用户在弹窗里点按钮，默认 30s 会直接被宿主掐断 → 显式放大到 600s。
+// 长轮询等待用户在弹窗里点按钮，默认 30s 会直接被宿主掐断 → 显式放大到 HOST_WAIT_SEC。
 function installVscode(print) {
   const file = path.join(os.homedir(), '.copilot', 'hooks', 'pomodoro.json');
   const cfg = readJson(file);
@@ -1755,7 +1799,8 @@ function installVscode(print) {
   };
   // 提问与审批都靠 PreToolUse（VS Code 没有 PermissionRequest）；
   // VS Code 会忽略 matcher，所以「只拦高风险工具」的判断写在 CLI 里
-  add('PreToolUse', { timeout: 600 });
+  // PreToolUse 要等用户点弹窗 → 超时必须放大（VS Code 默认 30 秒，会直接掐掉）
+  add('PreToolUse', { timeout: HOST_WAIT_SEC });
   add('PostToolUse', { timeout: 30 });
   add('SessionStart', { timeout: 30 });
   add('UserPromptSubmit', { timeout: 30 });
@@ -1789,7 +1834,7 @@ function installTrae(print) {
   cfg.version = 1;
   cfg.hooks = cfg.hooks || {};
   const h = hookCommandShell('trae');
-  const withTimeout = (e) => ({ ...e, timeout: 600 });
+  const withTimeout = (e) => ({ ...e, timeout: HOST_WAIT_SEC });
   const fastTimeout = (e) => ({ ...e, timeout: 30 });
   // PreToolUse 要等用户点弹窗 → 超时必须放大（Trae 默认 30 秒，会直接掐掉）
   pushHook(cfg.hooks, 'PreToolUse', { matcher: TRAE_PRETOOL_MATCHER, hooks: [withTimeout({ ...h })] });
@@ -1823,9 +1868,9 @@ function installCursor(print) {
       list.push({ command: cmd, ...(extra || {}) });
     }
   };
-  add('beforeShellExecution', { timeout: 600 });
-  add('preToolUse', { timeout: 600 });
-  add('beforeMCPExecution', { timeout: 600 });
+  add('beforeShellExecution', { timeout: HOST_WAIT_SEC });
+  add('preToolUse', { timeout: HOST_WAIT_SEC });
+  add('beforeMCPExecution', { timeout: HOST_WAIT_SEC });
   add('beforeSubmitPrompt');
   add('afterFileEdit');
   add('afterShellExecution');
@@ -1834,8 +1879,95 @@ function installCursor(print) {
   writeJson(file, cfg, print);
 }
 
-// Codex CLI（~/.codex/config.toml）只有 notify：回合结束时回调一次，无权限决策通道
+// Codex CLI（codex-cli 0.154.x）：**12 个 hook 事件**，配置放 ~/.codex/hooks.json
+// （或 config.toml 的内联 [hooks]；同一层两者都有会都加载并告警 → 只用 hooks.json）。
+//
+// 与其他宿主最大的不同：Codex **有独立的 PermissionRequest 事件**，而且只在「Codex 本来
+// 就要问用户」时才触发 —— 这正是想要的语义，不用像 VS Code / Trae 那样在 PreToolUse 上猜
+// 哪些调用会被宿主拦，也就没有「用户已在宿主设了自动允许、弹窗还在问」的误报。
+//
+// PreToolUse 这一侧只上报活动、不参与决策（allow/ask 在 Codex 上不生效，见
+// PERMISSION_EVENT_ONLY_SOURCES）；Codex 的 matcher 是**真生效的正则**，所以先拿它收窄，
+// 省掉每个工具调用都 spawn 一次进程。
+//
+// 注意：UserPromptSubmit 与 Stop 的 matcher 不生效，别给它们写 matcher。
+const CODEX_TOOL_MATCHER = 'Bash|apply_patch|Edit|Write|mcp__.*';
+
+// 老的 notify 通道（config.toml）：回合结束回调一次。默认不改写它 —— 用户可能已经把它
+// 指向别的工具（例如 codex-computer-use）。要加用 install --with-notify。
+let WITH_NOTIFY = false;
+
+// 用户可能在 config.toml 里把 hooks 关了（[features] hooks = false）
+function codexHooksDisabled() {
+  try {
+    const t = fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8');
+    const seg = t.split(/^\s*\[/m).find((s) => /^features\]/.test(s.trim()));
+    return !!seg && /^\s*(codex_)?hooks\s*=\s*false/m.test(seg);
+  } catch (e) { return false; }
+}
+
+// config.toml 里已经有内联 [hooks] → 会与 hooks.json 双重加载并告警
+function codexInlineHooks() {
+  try {
+    const t = fs.readFileSync(path.join(os.homedir(), '.codex', 'config.toml'), 'utf8');
+    return /^\s*\[hooks\]|^\s*\[\[hooks\./m.test(t);
+  } catch (e) { return false; }
+}
+
 function installCodex(print) {
+  const file = path.join(os.homedir(), '.codex', 'hooks.json');
+  const cfg = readJson(file);
+  cfg.hooks = cfg.hooks || {};
+  const h = hookCommandShell('codex');
+  const withTimeout = (e) => ({ ...e, timeout: HOST_WAIT_SEC });
+  const fastTimeout = (e) => ({ ...e, timeout: 30 });
+  // 审批：Codex 唯一认 allow/deny 的地方，要等用户点弹窗 → timeout 必须放大
+  pushHook(cfg.hooks, 'PermissionRequest', { hooks: [withTimeout({ ...h })] });
+  // 以下都只上报，不回决策
+  pushHook(cfg.hooks, 'PreToolUse', { matcher: CODEX_TOOL_MATCHER, hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'PostToolUse', { matcher: CODEX_TOOL_MATCHER, hooks: [fastTimeout({ ...h })] });
+  // UserPromptSubmit：唯一带「用户这次让 agent 干什么」的事件（payload.prompt）
+  pushHook(cfg.hooks, 'UserPromptSubmit', { hooks: [fastTimeout({ ...h })] });
+  // Stop / SubagentStop：只上报，绝不回 decision:"block"（那会把 agent 拖进自动续跑）
+  pushHook(cfg.hooks, 'Stop', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'SubagentStart', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'SubagentStop', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'SessionStart', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'SessionEnd', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'PreCompact', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'PostCompact', { hooks: [fastTimeout({ ...h })] });
+  pushHook(cfg.hooks, 'Interrupt', { hooks: [fastTimeout({ ...h })] });
+  writeJson(file, cfg, print);
+  if (print) {
+    // 干跑也要把将要写入的 notify 显示出来，否则 --print 会漏报这次改动
+    if (WITH_NOTIFY) installCodexNotify(print);
+    return;
+  }
+
+  const notes = [
+    'Codex 注意事项：',
+    `  1) 配置在 ${file}（用户级，不受项目信任影响）；项目级 .codex/ 只在项目被信任后加载。`,
+    '     同一层里 hooks.json 与 config.toml 的 [hooks] 同时存在会两条都跑并告警 → 二选一。',
+    '  2) 审批走 PermissionRequest（只在 Codex 本来就要问时才触发）。PreToolUse 只上报活动：',
+    '     它的 allow/ask 在 Codex 上不生效，只有 deny 有效（带非空 reason）。',
+    '  3) 本命令不改写 config.toml 的 notify，避免覆盖你已有的通知工具；',
+    '     需要旧的回合结束回调时加：install --agent codex --with-notify',
+  ];
+  if (codexHooksDisabled()) {
+    notes.push('  ⚠ 你的 ~/.codex/config.toml 里写了 [features] hooks = false —— hooks 被关了，' +
+      '\n     弹窗不会出现。删掉这行或改成 true 再试。');
+  }
+  if (codexInlineHooks()) {
+    notes.push('  ⚠ 你的 ~/.codex/config.toml 里已有内联 [hooks] 段 —— 会与本次写入的 hooks.json' +
+      '\n     同时加载并告警，同一次调用可能跑两遍。建议二选一。');
+  }
+  process.stdout.write(notes.join('\n') + '\n');
+
+  if (WITH_NOTIFY) installCodexNotify(print);
+}
+
+// Codex CLI 的老通道（~/.codex/config.toml 的 notify）：回合结束回调一次
+function installCodexNotify(print) {
   const file = path.join(os.homedir(), '.codex', 'config.toml');
   let text = '';
   try { text = fs.readFileSync(file, 'utf8'); } catch (e) { text = ''; }
@@ -1868,10 +2000,10 @@ function installZcode(print) {
   const cfg = readJson(file);
   cfg.hooks = cfg.hooks || {};
   cfg.hooks.enabled = true;                       // 必须显式开启
-  cfg.hooks.timeoutMs = cfg.hooks.timeoutMs || 600000;
+  cfg.hooks.timeoutMs = cfg.hooks.timeoutMs || HOST_WAIT_MS;
   const events = cfg.hooks.events || (cfg.hooks.events = {});
   const h = hookCommandShell('zcode');
-  const long = (e) => ({ ...e, timeoutMs: 600000 });
+  const long = (e) => ({ ...e, timeoutMs: HOST_WAIT_MS });
   pushHook(events, 'PermissionRequest', { matcher: '*', hooks: [long(h)] });
   pushHook(events, 'PreToolUse', { matcher: 'AskUserQuestion', hooks: [long(h)] });
   pushHook(events, 'Stop', { hooks: [h] });
@@ -1911,6 +2043,7 @@ const HOOK_AGENT_NAMES = ['zcode', 'claude', 'vscode', 'trae', 'cursor', 'openco
 function runInstall(args) {
   const print = args.includes('--print');
   CLEAN_STALE = args.includes('--clean');
+  WITH_NOTIFY = args.includes('--with-notify');
   const idx = args.indexOf('--agent');
   const agent = (idx >= 0 && args[idx + 1]) || 'all';
 
@@ -1969,11 +2102,12 @@ function usage() {
     '  pomodoro-hook.js host-perms [--source vscode|trae] [--tool run_in_terminal]',
     '                             [--command "ls -la"] [--cwd <项目目录>]',
     '                                          # 看「跟随宿主自动允许」读到了什么、判定成什么',
-    '  pomodoro-hook.js install --agent <宿主> [--print] [--clean]',
+    '  pomodoro-hook.js install --agent <宿主> [--print] [--clean] [--with-notify]',
     '',
     '  宿主：zcode / claude / vscode / trae / cursor / opencode / codex / qwen / all',
-    '  --print  只打印将要写入的配置，不动文件',
-    '  --clean  同时清掉指向番茄钟 hook 其它副本的旧条目',
+    '  --print        只打印将要写入的配置，不动文件',
+    '  --clean        同时清掉指向番茄钟 hook 其它副本的旧条目',
+    '  --with-notify  仅 Codex：额外改写 config.toml 的 notify（默认不动）',
   ].join('\n') + '\n');
 }
 
