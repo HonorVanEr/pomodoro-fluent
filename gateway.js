@@ -23,6 +23,9 @@
 //   - 超时：      action 落回该 kind 的安全默认值（permission=deny，ask=cancel）
 //   - 被顶掉/关闭：action = null（调用方应回退到终端原生询问，不替用户做决定）
 //
+// 「暂时收起」（hold）对调用方不可见：它只把窗口收起来，HTTP 请求继续挂着，
+// 等用户从托盘重新唤回作答、或被兜底收走。调用方拿到的仍是上面三种之一。
+//
 // 安全：仅绑定 127.0.0.1；除 /health 外全部要求 Bearer token；
 // 校验 Host 头只允许 127.0.0.1/localhost（防 DNS rebinding）。
 // 发现文件 userData/gateway.json（port/token/pid）供外部 CLI 定位。
@@ -37,8 +40,12 @@ const GATEWAY_VERSION = 2;
 const DEFAULT_PORT = 5277;
 const PORT_ATTEMPTS = 20;          // 端口被占时依次 +1 重试
 const BODY_LIMIT = 256 * 1024;     // 请求体上限（提问/工具输入可能较长）
-const DEFAULT_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
-const MAX_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
+// 兜底等待：默认 1 小时。这不是「限制用户思考」，而是安全阀 ——
+// 它必须早于宿主的 hook timeout 到点，好让 hook 还有机会回一句「未决策」，
+// 把决定交还宿主原生询问。若放任宿主先到点，它会直接杀掉 hook 进程，
+// 那句回退根本发不出去，宿主就按自己的审批设置走了（可能静默放行）。
+const DEFAULT_CONFIRM_TIMEOUT_MS = 60 * 60 * 1000;
+const MAX_CONFIRM_TIMEOUT_MS = 2 * 60 * 60 * 1000;
 const BREAK_SUGGEST_COOLDOWN_MS = 10 * 60 * 1000; // 「休息建议」弹窗冷却
 const BREAK_SUGGEST_TIMEOUT_MS = 2 * 60 * 1000;
 
@@ -223,10 +230,12 @@ function createGateway(deps) {
   //   showPopup(payload)      弹窗（main.showNotify，payload.kind 决定交互形态）
   //   sendTimerCommand(cmd)   转发定时器命令到渲染进程（toggle/reset/skip）
   //   onActivity(activity)    活动计数变化 → 推给主窗口展示
+  //   onEvent(e)              每条 agent 事件原样上报（供工作记录落盘，可选）
   //   getTimerState()         主进程缓存的定时器状态
   //   getUserDataPath()       Electron userData 目录
   //   log(...args)            日志
-  const { showPopup, sendTimerCommand, onActivity, getTimerState, getUserDataPath, log } = deps;
+  //   onPendingChange(list)   待处理交互集变化 → 主进程刷新托盘入口（可选）
+  const { showPopup, sendTimerCommand, onActivity, onEvent, getTimerState, getUserDataPath, log, onPendingChange } = deps;
 
   let server = null;
   let port = null;
@@ -238,7 +247,8 @@ function createGateway(deps) {
   let prevPhase = null;
   let lastBreakSuggestAt = 0;
 
-  // id -> { resolve, timer, kind, defaultAction }
+  // id -> { resolve, timer, kind, defaultAction, state, heldAt, expiresAt, payload }
+  // state: 'active'（窗口正在等决策）| 'held'（用户暂时收起，仍在等）
   const pendingInteractions = new Map();
 
   // ---- 发现文件（CLI 靠它找到端口与 token） ----
@@ -284,8 +294,12 @@ function createGateway(deps) {
   // ---- 交互弹窗（长轮询） ----
   // 单窗口策略：任何新弹窗都会顶掉旧交互窗，旧请求按 dismissed 返回
   // （action=null → 调用方回退终端原生询问，绝不替用户做决定）
-  function dismissPending(reason) {
+  // keepHeld=true（默认）时放过「暂时收起」的那些：用户点名要稍后处理，
+  // 一条通知或一个新弹窗不该替他把它丢掉。
+  function dismissPending(reason, keepHeld = true) {
     for (const id of [...pendingInteractions.keys()]) {
+      const p = pendingInteractions.get(id);
+      if (keepHeld && p && p.state === 'held') continue;
       resolveInteraction(id, { action: null, answers: {}, text: '' }, reason || 'dismissed');
     }
   }
@@ -304,7 +318,14 @@ function createGateway(deps) {
       text: r.text || '',
       decidedBy: decidedBy || 'user',
     });
+    // 收起的那条被兜底收走时也要告诉主进程，否则托盘会留下点不动的死条目
+    if (p.state === 'held') emitPending();
     return true;
+  }
+
+  function emitPending() {
+    if (!onPendingChange) return;
+    try { onPendingChange(listPending()); } catch (e) { /* 托盘刷新失败不影响决策链路 */ }
   }
 
   // 兼容旧调用：只回一个 action
@@ -335,13 +356,22 @@ function createGateway(deps) {
 
     const id = crypto.randomUUID();
     return new Promise((resolve) => {
+      // 兜底定时器照常启动，且「暂时收起」期间不停表：用户收起窗口不等于
+      // 这事有人管了，见 DEFAULT_CONFIRM_TIMEOUT_MS 处说明。
       const timer = setTimeout(() => {
         resolveInteraction(id, { action: o.defaultAction, answers: {}, text: '' }, 'timeout');
       }, o.timeoutMs);
-      pendingInteractions.set(id, { resolve, timer, kind: o.kind, defaultAction: o.defaultAction });
-      // 新弹窗替换旧交互
+      pendingInteractions.set(id, {
+        resolve, timer, kind: o.kind, defaultAction: o.defaultAction,
+        state: 'active', heldAt: 0, expiresAt: Date.now() + o.timeoutMs,
+        payload: { id, interactive: true, ...o },   // 唤回时原样重弹
+      });
+      // 新弹窗替换旧交互；「暂时收起」的除外
       for (const other of [...pendingInteractions.keys()]) {
-        if (other !== id) resolveInteraction(other, { action: null, answers: {}, text: '' }, 'dismissed');
+        if (other === id) continue;
+        const p = pendingInteractions.get(other);
+        if (p && p.state === 'held') continue;
+        resolveInteraction(other, { action: null, answers: {}, text: '' }, 'dismissed');
       }
       showPopup({ id, interactive: true, ...o });
     });
@@ -355,9 +385,54 @@ function createGateway(deps) {
   // ---- 通知弹窗（不等待） ----
   function notifyPopup(payload) {
     const o = normalizeInteraction({ kind: 'notification', ...(payload || {}) });
+    // 通知会顶掉正在等决策的交互窗，但不动「暂时收起」的
     dismissPending('dismissed');
     showPopup({ id: null, interactive: false, ...o });
     return { ok: true };
+  }
+
+  // ---- 暂时收起（hold）/ 唤回 ----
+  // 收起只改状态 + 让主进程关窗，不 resolve、不停表：HTTP 请求继续挂着。
+  function holdInteraction(id) {
+    const p = pendingInteractions.get(id);
+    if (!p || p.state === 'held') return null;
+    p.state = 'held';
+    p.heldAt = Date.now();
+    emitPending();
+    return pendingSummary(id, p);
+  }
+
+  // 唤回：把存档的 payload 交回主进程重新弹窗；已被兜底收走的不复活
+  function reopenInteraction(id) {
+    const p = pendingInteractions.get(id);
+    if (!p || p.state !== 'held') return null;
+    p.state = 'active';
+    p.heldAt = 0;
+    emitPending();
+    return p.payload || null;
+  }
+
+  function pendingSummary(id, p) {
+    const pl = p.payload || {};
+    const ctx = pl.context || {};
+    return {
+      id,
+      kind: p.kind,
+      state: p.state,
+      heldAt: p.heldAt,
+      expiresAt: p.expiresAt || 0,
+      title: pl.title || '',
+      message: pl.message || '',
+      source: pl.source || '',
+      // 工具名优先取 context，退回 permission.tool：直连 API 的调用方
+      // 常常只传 permission.tool，托盘菜单标签要靠它才不至于只剩标题
+      tool: ctx.tool || (pl.permission && pl.permission.tool) || '',
+    };
+  }
+
+  // 待处理列表（含正在弹的那个），供托盘 / 主窗口展示入口
+  function listPending() {
+    return [...pendingInteractions.entries()].map(([id, p]) => pendingSummary(id, p));
   }
 
   // ---- agent 事件 → 计数 + 策略弹窗 ----
@@ -371,6 +446,10 @@ function createGateway(deps) {
     const e = ev || {};
     if (!EVENT_KINDS.has(e.kind)) {
       return { ok: false, error: `unknown kind: ${e.kind}` };
+    }
+    // 原样上报给主进程做工作记录（归纳交给大模型，这里只留事实）
+    if (onEvent) {
+      try { onEvent(e); } catch (err) { log('[gateway] onEvent 回调异常:', err && err.message); }
     }
     let triggered = null;
     switch (e.kind) {
@@ -408,8 +487,8 @@ function createGateway(deps) {
         break;
 
       default:
-        // tool-before / subagent-start / subagent-stop / pre-compact / prompt：
-        // 只用于弹窗上下文与调试，不计数也不弹窗
+        // tool-before / subagent-start / subagent-stop / pre-compact / post-compact /
+        // interrupt / prompt：只用于弹窗上下文与调试，不计数也不弹窗
         break;
     }
     emitActivity();
@@ -680,6 +759,9 @@ function createGateway(deps) {
     dismissPending,
     requestInteraction,
     requestConfirm,
+    holdInteraction,
+    reopenInteraction,
+    listPending,
     handleEvent,
     notifyPopup,
     getActivity: () => ({ ...activity }),

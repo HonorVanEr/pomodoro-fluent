@@ -23,6 +23,8 @@ contextBridge.exposeInMainWorld('pomodoro', {
 
   // 交互弹窗（ask / permission / custom）用户决策结果
   respondInteraction: (payload) => ipcRenderer.send('interaction:respond', payload),
+  // 「暂时收起」：不结束这次交互，只收起窗口，之后可从托盘唤回
+  holdInteraction: (id) => ipcRenderer.send('interaction:hold', { id }),
   // 旧接口：只有 action 的确认弹窗
   respondConfirm: (id, action) => ipcRenderer.send('confirm:respond', { id, action }),
 

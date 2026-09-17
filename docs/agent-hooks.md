@@ -10,7 +10,7 @@ VS Code Copilot hook ──┼─HTTP→ 127.0.0.1:5277 网关 ─→ 弹窗 ─
 Trae hook ─────────────┤      (token 鉴权)      ↖ 长轮询   ├─ 通知弹窗（看完即走）
 Cursor hook ───────────┤                        用户决策    └─ 专注期活动计数 / 远程控制
 OpenCode 插件 ─────────┤
-Codex notify ──────────┘
+Codex hooks ───────────┘
 ```
 
 各宿主支持到什么程度：
@@ -23,7 +23,7 @@ Codex notify ──────────┘
 | Trae | ✅ `AskUserQuestion` | ⚠️ 挂在 `PreToolUse`（无 `PermissionRequest`；matcher 可收窄 + 脚本兜底 + **跟随宿主的自动运行设置**） | ✅ `Notification` / `Stop` | `%userprofile%/.trae-cn/hooks.json` 或 `.trae/hooks.json` |
 | Cursor | ✅ `preToolUse` + `updated_input` | ✅ `beforeShellExecution` / `preToolUse` / `beforeMCPExecution` | ✅ | `~/.cursor/hooks.json` 或 `.cursor/hooks.json` |
 | OpenCode | ✅ `question.asked` | ✅ `permission.ask` | ✅ | 插件 + `opencode.json` |
-| Codex CLI | ❌ 无提问回调 | ❌ 无权限回调（TUI 审批） | ✅ 回合结束通知 | `~/.codex/config.toml` 的 `notify` |
+| Codex CLI | ❌ 无提问回调 | ✅ `PermissionRequest`（Codex 的独立权限事件，**只在它本来就要问时触发**） | ✅ 12 个事件 | `~/.codex/hooks.json` 或 `~/.codex/config.toml` 的内联 `[hooks]` |
 | Qwen Code | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.qwen/settings.json` |
 
 > 任何「Claude Code 兼容格式」的宿主（iFlow、Trae、CodeBuddy、Copilot CLI 等）都能直接用，把 `pomodoro-hook.js` 当成 hook command 填进去即可。
@@ -38,9 +38,46 @@ Codex notify ──────────┘
 
 **兜底策略（重要）**：
 
-- 超时未决策 → `permission` 落回 **deny**，`ask` 落回 **cancel**（安全侧，绝不替你放行）；
-- 你手动关掉弹窗、或弹窗被新弹窗顶掉 → 返回空决策，agent 回退到**终端原生询问**，不会静默通过；
+- 超时未决策 → 网关回该 kind 的安全默认值（`permission`=**deny**、`ask`=**cancel**），
+  但 hook CLI 只认 `decidedBy: "user"`，所以这层默认值**不会被当成你的决定用掉**，
+  实际表现是「不输出决策」→ agent 回退到**终端原生询问**，绝不替你放行；
+- 你手动关掉弹窗（右上角 ×）→ 空决策，同样回退终端原生询问；
+- 弹窗被新弹窗顶掉 → 空决策，同样回退终端；
 - 番茄钟没启动 → hook 静默退出，绝不阻断 agent。
+
+无论关窗还是等超时，agent 都不会卡死：拿不到决策它就去问终端。
+
+## 两种「临时关闭」：交给终端 / 暂时收起
+
+弹窗上有两条不同的退路，别混：
+
+| 操作 | 语义 | agent 那边发生什么 |
+|---|---|---|
+| 右上角 **×** | **交给终端**：这次不在弹窗里答了 | 拿到空决策 → 回退**宿主原生询问**（终端里再问你一次） |
+| 底部 **暂时收起，稍后从托盘处理** | **挂起**：这次交互还活着，只是把窗口收起来 | HTTP 长轮询**继续挂着**，agent 保持等待 |
+
+收起之后怎么找回来：**系统托盘图标 → 「待处理的确认（N）」**，点一下重新弹出；
+收起多条时菜单里会多一个「选择要处理的…」子菜单，托盘 tooltip 也会显示待处理条数。
+
+挂起**不影响兜底计时**——收起不等于有人管了，到点照样按上面的兜底策略收尾。
+
+## 三层超时：谁先到点，谁决定结局
+
+等待链路是三层嵌套的，**顺序不能乱**：
+
+| 层 | 默认值 | 到点后果 |
+|---|---|---|
+| 番茄钟兜底（网关） | `POMODORO_TIMEOUT_S` = **3600s** | 回空决策 → agent 回退终端原生询问（后果确定） |
+| hook 等网关（HTTP） | 兜底 + 300s = **3900s** | 请求异常退出（不该发生，只是保险） |
+| **宿主 hook timeout** | **4200s**（装 hook 时自动写进配置） | 宿主**直接杀掉 hook 进程**，空决策那句根本发不出去 → 宿主按**自己的审批设置**走 |
+
+**为什么宿主那层必须最大**：宿主掐掉 hook 时，hook 没机会回「未决策」，
+于是宿主按自己的审批设置处理 —— 你要是把某个工具设成了免确认，就等于**静默放行**。
+所以三层必须满足 `宿主 > hook 等网关 > 番茄钟兜底`，让番茄钟永远先到点。
+
+> 手写 hook 配置时最容易漏这个：VS Code 的 `timeout` 默认只有 **30 秒**，
+> 30 秒后宿主掐掉 hook，弹窗白弹。装 hook 时会自动写 `4200`；
+> 手动改过配置的话记得对齐。
 
 ## 弹窗上的上下文：哪个 agent、哪个任务、在动哪个工具
 
@@ -128,7 +165,9 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 - 会**自动合并**进对应配置文件，原文件备份为 `*.pomodoro.bak`；
 - 已存在相同条目不会重复写入；
 - 加 `--print` 只打印将要写入的内容，不动文件；
-- 加 `--clean` 会清掉指向番茄钟 hook 其它副本的旧条目（避免同一个事件弹两次窗）。
+- 加 `--clean` 会清掉指向番茄钟 hook 其它副本的旧条目（避免同一个事件弹两次窗）；
+- 加 `--with-notify`（仅 Codex）才会额外改写 `~/.codex/config.toml` 的 `notify` —— 默认不动它，
+  因为那个键可能已被你指向别的工具（例如 codex-computer-use）。
 
 改动需**重启 agent 会话**后生效（三端都是在会话启动时快照 hook 配置）。
 
@@ -255,8 +294,8 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 {
   "hooks": {
     "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
-    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 600 }] }],
-    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 600 }] }],
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
+    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
     "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }]
   }
@@ -334,7 +373,7 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 
 **超时要留够**：VS Code 的 hook 默认 `timeout` 只有 **30 秒**（单位是秒），
 而我们要等你点弹窗 —— 所以 `install --agent vscode` 会把 `PreToolUse` 的
-`timeout` 显式设成 `600`。手写配置时别漏了这个字段，否则 30 秒后宿主直接掐掉 hook，
+`timeout` 显式设成 `4200`。手写配置时别漏了这个字段，否则 30 秒后宿主直接掐掉 hook，
 弹窗白弹。
 
 **已在 Claude Code 配过的机器**：VS Code 默认也会读 `~/.claude/settings.json`，
@@ -354,7 +393,7 @@ hook 是否执行、以及 `Load Hooks` 日志里各 hook 是从哪个文件加�
 {
   "version": 1,
   "hooks": {
-    "PreToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 600 }],
+    "PreToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 4200 }],
     "PostToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
     "SessionStart": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
     "UserPromptSubmit": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
@@ -382,7 +421,7 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 
 - 配置位置：全局 `%userprofile%/.trae-cn/hooks.json`（`install --agent trae` 会写这里），
   或界面里 设置 > Hooks 创建；项目级 `$PROJECT/.trae/hooks.json`。
-- `timeout` 单位是**秒**、默认 30 → `PreToolUse` 显式设 600，否则等你点弹窗的工夫它就被掐了。
+- `timeout` 单位是**秒**、默认 30 → `PreToolUse` 显式设 4200，否则等你点弹窗的工夫它就被掐了。
 - **`matcher` 在 Trae 上是真生效的**（仅限 `PreToolUse` / `PostToolUse` / `Notification`），
   所以 PreToolUse 用 `RunCommand|Bash|Shell|DeleteFile|…` 先把普通工具挡在外面，
   脚本里的高风险判断只作兜底。
@@ -413,7 +452,7 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
   "hooks": {
     "PreToolUse": [{
       "matcher": "RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile",
-      "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 600 }]
+      "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 4200 }]
     }],
     "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
@@ -459,9 +498,9 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 {
   "version": 1,
   "hooks": {
-    "beforeShellExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 600 }],
-    "preToolUse": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 600 }],
-    "beforeMCPExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 600 }],
+    "beforeShellExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 4200 }],
+    "preToolUse": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 4200 }],
+    "beforeMCPExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 4200 }],
     "beforeSubmitPrompt": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
     "afterFileEdit": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
     "afterShellExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
@@ -473,14 +512,82 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 
 ## Codex CLI
 
-Codex 目前只有 `notify`（回合结束时回调一次，JSON 作为参数传入），**没有权限回调通道**，所以 Codex 侧只能做到「任务跑完通知你 + 计入专注期活动」：
+Codex（`codex-cli` 0.154+）有完整的 hooks 体系，**12 个事件**：
 
-```toml
-# ~/.codex/config.toml
-notify = ["node", "C:\\Users\\<你>\\AppData\\Roaming\\番茄钟\\hook\\pomodoro-hook.js", "codex-notify"]
+```
+PreToolUse  PermissionRequest  PostToolUse
+SessionStart  SessionEnd  UserPromptSubmit
+SubagentStart  SubagentStop  Stop  Interrupt
+PreCompact  PostCompact
 ```
 
-`install --agent codex` 会把这行合并进去（已有 `notify` 就替换，原文件备份为 `config.toml.pomodoro.bak`）。
+配置写 `~/.codex/hooks.json`（用户级；项目级 `.codex/hooks.json` 只在项目被信任后才加载）：
+
+```json
+{
+  "hooks": {
+    "PermissionRequest": [
+      { "hooks": [{ "type": "command", "command": "node \"...\\pomodoro-hook.js\" --source codex", "timeout": 4200 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
+        "hooks": [{ "type": "command", "command": "node \"...\\pomodoro-hook.js\" --source codex", "timeout": 30 }] }
+    ]
+  }
+}
+```
+
+`install --agent codex` 会把这 12 个事件全部写好。
+
+### 三个必须知道的差异
+
+**1）审批只在 `PermissionRequest` 上做，不在 `PreToolUse` 上做。**
+
+Codex 的 `PreToolUse` 只强制执行 `permissionDecision: "deny"`（而且必须带非空
+`permissionDecisionReason`）；`"allow"` 和 `"ask"` 都只是**被解析、不生效**：
+
+```
+PreToolUse hook returned unsupported permissionDecision:allow
+PreToolUse hook returned unsupported permissionDecision:ask
+```
+
+所以在 `PreToolUse` 上弹窗是错的 —— 你点「允许」根本传不回去，Codex 会照自己的审批
+流程走，而那条流程又会触发 `PermissionRequest` → **弹两次窗**。番茄钟对 Codex 的
+`PreToolUse` 只上报活动、绝不回决策。
+
+好在 Codex 的 `PermissionRequest` **只在「Codex 本来就要问用户」时才触发**（不需要审批的
+调用不跑），条件比 `PreToolUse` 精确得多。因此 Codex **也不需要** VS Code / Trae 那套
+「跟随宿主自动允许」的猜测 —— Codex 自己已经判断过要不要问了。
+
+**2）`updatedPermissions` 在 Codex 上会让整条答复失败。**
+
+```
+PermissionRequest hook returned unsupported updatedPermissions
+PermissionRequest hook returned unsupported updatedInput
+```
+
+`updatedInput` / `updatedPermissions` / `interrupt` 都留给未来版本，当前遇到就是
+**fail closed**。所以给 Codex 的答复里只放 `behavior` + `message`；
+「始终允许」靠番茄钟本地规则落盘（`%APPDATA%/pomodoro-fluent/hook-cache/always-allow.json`）。
+
+**3）matcher 是真生效的正则，但不是所有事件都支持。**
+
+`PreToolUse` / `PostToolUse` / `PermissionRequest` / `SessionStart` / `SessionEnd` /
+`SubagentStart` / `SubagentStop` / `PreCompact` / `PostCompact` 支持 `matcher`；
+**`UserPromptSubmit` 与 `Stop` 不支持（写了会被忽略）**，所以那两个事件不写 matcher。
+
+工具名统一为 `Bash`（含 unified exec）、`apply_patch`（也可用 `Edit` / `Write` 匹配）、
+`mcp__server__tool`、以及其它本地函数工具名（如 `update_plan`、`spawn_agent`）。
+
+### 其它提醒
+
+- `[features] hooks = false` 会关掉全部 hooks；安装时会检测并告警。
+- 同一层里 `hooks.json` 与 `config.toml` 的内联 `[hooks]` **同时存在会两条都加载并告警**，
+  建议二选一（`install` 只写 `hooks.json`）。
+- `install --agent codex` **默认不改写 `config.toml` 的 `notify`**（那可能已被你指向
+  codex-computer-use 之类的工具）。需要老的回合结束回调时加 `--with-notify`。
+- Codex 的 `Stop` / `SubagentStop` 支持 `decision: "block"` 让 agent 继续跑；
+  番茄钟**绝不**返回它（那会把 agent 拖进自动续跑）。
 
 ## Qwen Code
 
@@ -553,10 +660,13 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | `permission` | `permission` 用：`{tool, rule, suggestions[], canAlways}` |
 | `input` | 文本输入：`{enabled, label, placeholder, required}`（权限弹窗默认开） |
 | `actions[]` | `custom` / `notification` 用：`{id, label, style: primary\|danger\|default}` |
-| `timeoutMs` | 等待上限（5s ~ 10min，默认 5min） |
-| `defaultAction` | 超时兜底值，默认 `permission=deny`、`ask=cancel`、`custom=null` |
+| `timeoutMs` | 兜底等待上限（5s ~ 2h，默认 **1h**）。到点回安全默认值，见下 |
+| `defaultAction` | 超时兜底值，默认 `permission=deny`、`ask=cancel`、`custom=null`。**hook CLI 只认 `decidedBy:"user"`，不会拿它当你的决定用**，所以默认值只对直连 API 的调用方有意义 |
 
 返回：`{ok, kind, action, answers, text, decidedBy}`，`decidedBy` 为 `user` / `timeout` / `dismissed` / `shown`。
+
+弹窗上的「暂时收起」**不会**让这个请求提前返回 —— 它只是把窗口收起来，长轮询继续挂着，
+直到用户从托盘唤回作答、或到达兜底上限。详见「两种「临时关闭」」一节。
 
 CLI 直连模式（等价于上面的通用能力）：
 
@@ -600,7 +710,7 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 | `POMODORO_LOCAL_ALWAYS_ALLOW` | 1 | 0 关闭本地「始终允许」规则缓存（VS Code / Cursor 不支持规则回写，靠它落地） |
 | `POMODORO_ALWAYS_ALLOW` | 1 | 0 隐藏「始终允许」按钮 |
 | `POMODORO_PERMISSION_DEST` | projectSettings | 「始终允许」写进哪份配置 |
-| `POMODORO_TIMEOUT_S` | 240 | 弹窗等待秒数（上限 590；hook 配置的 timeout 要 ≥ 它，VS Code 的默认 timeout 只有 30 秒，务必显式调大） |
+| `POMODORO_TIMEOUT_S` | 3600 | 番茄钟兜底等待秒数（上限 7200）。宿主的 hook timeout 必须比它大——装了 hook 会自动写 4200s |
 | `POMODORO_ASK_MODE` | answers（VS Code 为 deny） | `deny` = 用「拒绝 + 答案写进原因」的方式回传提问答案 |
 | `POMODORO_GATEWAY_FILE` | 自动发现 | 指定 gateway.json 路径 |
 | `POMODORO_PORT` / `POMODORO_TOKEN` | 自动发现 | 直接指定网关端口与 token |
