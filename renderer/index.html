@@ -97,6 +97,13 @@
 
     <!-- 本专注期 agent 活动（Claude Code / OpenCode 等 hook 上报） -->
     <div class="agent-activity" id="agentActivity" hidden></div>
+
+    <!-- 被「暂时收起」的确认：点一下重新弹出来作答（托盘之外的第二个入口） -->
+    <button class="held-chip" id="heldChip" type="button" hidden>
+      <span class="held-chip-dot"></span>
+      <span class="held-chip-text" id="heldChipText"></span>
+      <span class="held-chip-open">打开</span>
+    </button>
   </main>
 
   <!-- 控制按钮 -->

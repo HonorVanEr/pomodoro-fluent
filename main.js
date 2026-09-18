@@ -394,6 +394,13 @@ function createTray() {
   tray.on('double-click', () => {
     toggleMainWindow();
   });
+
+  // 单击托盘：有「暂时收起」的确认就直接唤回来 —— 收起后这是最自然的找法。
+  // 没有待处理时保持原样（不动窗口），以免与双击的显示/隐藏互相打架
+  // （Windows 上双击会先触发一次 click，两边都切窗口就会来回抵消）。
+  tray.on('click', () => {
+    if (heldPending().length) reopenHeld(null);
+  });
 }
 
 // ---- 待处理的「暂时收起」确认 ----
@@ -411,6 +418,25 @@ function pendingMenuLabel(p) {
   return short ? `${kindText} · ${short}` : kindText;
 }
 
+// 收起列表的精简版：主窗口提示条只用来展示「有几条、分别是什么」
+function heldSummary() {
+  return heldPending().map((p) => ({
+    id: p.id,
+    kind: p.kind,
+    label: pendingMenuLabel(p),
+    title: p.title || '',
+  }));
+}
+
+// 推给主窗口：收起后除了托盘，主界面也要有一个看得见的入口
+function pushHeldState() {
+  const list = heldSummary();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('state:pending-held', list);
+  }
+  return list;
+}
+
 // 把用户收起的那条重新弹出来（不传 id 时取最早收起的）
 function reopenHeld(id) {
   if (!gateway) return;
@@ -425,8 +451,8 @@ function reopenHeld(id) {
 
 // 待处理数量变化时刷新托盘（菜单重建开销大，但这里本来就低频）
 function refreshPendingTray() {
+  const held = pushHeldState();
   if (!tray) return;
-  const held = heldPending();
   rebuildTrayMenu({ running: traySync.running });
   const base = traySync.timeText ? `番茄钟 ${traySync.timeText}` : '番茄钟';
   tray.setToolTip(held.length ? `${base} · ${held.length} 条确认待处理` : base);
@@ -823,9 +849,14 @@ ipcMain.on('interaction:hold', (e, payload) => {
   refreshPendingTray();
 });
 
-// 从托盘唤回收起的确认（不传 id 时取最早收起的那条）
+// 从托盘 / 主窗口唤回收起的确认（不传 id 时取最早收起的那条）
 ipcMain.on('interaction:reopen', (_e, payload) => {
   reopenHeld((payload && payload.id) || null);
+});
+
+// 主窗口加载完主动问一次当前有哪些被收起（推送可能早于页面就绪）
+ipcMain.on('pending:get-held', () => {
+  pushHeldState();
 });
 
 // ---------------------------------------------------------------------------

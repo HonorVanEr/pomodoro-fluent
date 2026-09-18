@@ -28,6 +28,9 @@ const PomodoroApp = (() => {
   let agentActivity = { toolCalls: 0, interruptions: 0, stops: 0, sessions: 0 };
   let gatewayState = { enabled: false, port: null, hookPath: null };
 
+  // 被「暂时收起」的确认（主进程经 state:pending-held 推送）
+  let heldPending = [];
+
   // ---- DOM 引用 ----
   const $ = (id) => document.getElementById(id);
   const dom = {
@@ -69,6 +72,8 @@ const PomodoroApp = (() => {
     installClean: $('installClean'),
     installResult: $('installResult'),
     agentActivity: $('agentActivity'),
+    heldChip: $('heldChip'),
+    heldChipText: $('heldChipText'),
     aboutVersion: $('aboutVersion'),
     aboutMeta: $('aboutMeta'),
     btnCheckUpdate: $('btnCheckUpdate'),
@@ -404,6 +409,22 @@ const PomodoroApp = (() => {
     if (show) {
       dom.agentActivity.textContent = `🤖 工具 ${a.toolCalls} · 打断 ${a.interruptions}`;
     }
+  }
+
+  // ---- 已收起的确认（主窗口里的唤回入口）----
+  // 「暂时收起」的交互并没有结束，agent 那边还在等；这里列出来让用户随时点回去。
+  function updateHeldUI() {
+    const chip = dom.heldChip;
+    if (!chip) return;
+    const n = heldPending.length;
+    chip.hidden = n === 0;
+    if (!n) return;
+    const first = heldPending[0] || {};
+    const what = String(first.label || first.title || '确认').trim();
+    dom.heldChipText.textContent = n === 1 ? what : `${n} 条确认待处理 · ${what}`;
+    chip.title = n === 1
+      ? `点击重新打开：${first.title || what}`
+      : `点击重新打开最早收起的一条（共 ${n} 条）`;
   }
 
   // 专注结束通知的统计后缀（无活动时为空串）
@@ -947,6 +968,23 @@ const PomodoroApp = (() => {
         updateAgentActivityUI();
       }
     });
+
+    // 已收起的确认：主进程推列表 → 渲染成提示条；点击唤回最早收起的那条
+    window.pomodoro.onPendingHeld((list) => {
+      heldPending = Array.isArray(list) ? list : [];
+      updateHeldUI();
+    });
+    window.pomodoro.requestHeldPending();
+    if (dom.heldChip) {
+      dom.heldChip.addEventListener('click', () => {
+        if (!heldPending.length) {
+          heldPending = [];
+          updateHeldUI();
+          return;
+        }
+        window.pomodoro.reopenInteraction((heldPending[0] || {}).id);
+      });
+    }
     window.pomodoro.requestGatewayState();
 
     // 关于：版本号在第一次打开抽屉时取；检查更新是应用唯一的联网入口（手动触发）

@@ -23,8 +23,17 @@ contextBridge.exposeInMainWorld('pomodoro', {
 
   // 交互弹窗（ask / permission / custom）用户决策结果
   respondInteraction: (payload) => ipcRenderer.send('interaction:respond', payload),
-  // 「暂时收起」：不结束这次交互，只收起窗口，之后可从托盘唤回
+  // 「暂时收起」：不结束这次交互，只收起窗口，之后可从托盘 / 主窗口提示条唤回
   holdInteraction: (id) => ipcRenderer.send('interaction:hold', { id }),
+  // 唤回收起的那条（不传 id 时取最早收起的）
+  reopenInteraction: (id) => ipcRenderer.send('interaction:reopen', { id: id || '' }),
+  // 主窗口启动时主动取一次「已收起」列表
+  requestHeldPending: () => ipcRenderer.send('pending:get-held'),
+  onPendingHeld: (cb) => {
+    const handler = (_e, list) => cb(list);
+    ipcRenderer.on('state:pending-held', handler);
+    return () => ipcRenderer.removeListener('state:pending-held', handler);
+  },
   // 旧接口：只有 action 的确认弹窗
   respondConfirm: (id, action) => ipcRenderer.send('confirm:respond', { id, action }),
 
