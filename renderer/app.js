@@ -28,6 +28,9 @@ const PomodoroApp = (() => {
   let agentActivity = { toolCalls: 0, interruptions: 0, stops: 0, sessions: 0 };
   let gatewayState = { enabled: false, port: null, hookPath: null };
 
+  // 被「暂时收起」的确认（主进程经 state:pending-held 推送）
+  let heldPending = [];
+
   // ---- DOM 引用 ----
   const $ = (id) => document.getElementById(id);
   const dom = {
@@ -69,6 +72,8 @@ const PomodoroApp = (() => {
     installClean: $('installClean'),
     installResult: $('installResult'),
     agentActivity: $('agentActivity'),
+    heldChip: $('heldChip'),
+    heldChipText: $('heldChipText'),
     aboutVersion: $('aboutVersion'),
     aboutMeta: $('aboutMeta'),
     btnCheckUpdate: $('btnCheckUpdate'),
@@ -406,6 +411,22 @@ const PomodoroApp = (() => {
     }
   }
 
+  // ---- 已收起的确认（主窗口里的唤回入口）----
+  // 「暂时收起」的交互并没有结束，agent 那边还在等；这里列出来让用户随时点回去。
+  function updateHeldUI() {
+    const chip = dom.heldChip;
+    if (!chip) return;
+    const n = heldPending.length;
+    chip.hidden = n === 0;
+    if (!n) return;
+    const first = heldPending[0] || {};
+    const what = String(first.label || first.title || '确认').trim();
+    dom.heldChipText.textContent = n === 1 ? what : `${n} 条确认待处理 · ${what}`;
+    chip.title = n === 1
+      ? `点击重新打开：${first.title || what}`
+      : `点击重新打开最早收起的一条（共 ${n} 条）`;
+  }
+
   // 专注结束通知的统计后缀（无活动时为空串）
   function agentStatsSuffix() {
     const a = agentActivity;
@@ -443,8 +464,8 @@ const PomodoroApp = (() => {
     }
     if (agent === 'vscode') {
       // VS Code Copilot Agent hooks：与 Claude Code 同格式，用户级放 ~/.copilot/hooks/*.json。
-      // 只有 8 个事件（无 PermissionRequest / Notification），审批走 PreToolUse；
-      // VS Code 会忽略 matcher，只拦高风险工具的判断在 CLI 里做。
+      // 只有 8 个事件（无 PermissionRequest / Notification），提问走 PreToolUse
+      // （2026-09-18 起不再做工具审批）；VS Code 会忽略 matcher。
       // timeout 单位是秒、默认只有 30 → 要等弹窗就必须显式调大。
       // 4200s 是给「三层嵌套」留的余量：番茄钟兜底 3600s → hook 等网关 3900s → 宿主 4200s。
       return JSON.stringify({
@@ -463,13 +484,13 @@ const PomodoroApp = (() => {
     }
     if (agent === 'trae') {
       // Trae：全局 %userprofile%/.trae-cn/hooks.json，Claude Code 那种嵌套格式。
-      // 6 个事件（有 Notification，无 PermissionRequest）→ 审批挂 PreToolUse。
-      // 与 VS Code 不同：Trae 的 matcher 真的生效，所以先用它把普通工具挡在外面。
+      // 6 个事件（有 Notification，无 PermissionRequest）→ 提问挂 PreToolUse
+      // （2026-09-18 起不再做工具审批，matcher 只匹配提问工具，活动上报走 PostToolUse）。
       return JSON.stringify({
         version: 1,
         hooks: {
           PreToolUse: [{
-            matcher: 'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile',
+            matcher: 'AskUserQuestion',
             hooks: [{ type: 'command', command: cmd('trae'), timeout: 4200 }],
           }],
           Notification: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],
@@ -947,6 +968,23 @@ const PomodoroApp = (() => {
         updateAgentActivityUI();
       }
     });
+
+    // 已收起的确认：主进程推列表 → 渲染成提示条；点击唤回最早收起的那条
+    window.pomodoro.onPendingHeld((list) => {
+      heldPending = Array.isArray(list) ? list : [];
+      updateHeldUI();
+    });
+    window.pomodoro.requestHeldPending();
+    if (dom.heldChip) {
+      dom.heldChip.addEventListener('click', () => {
+        if (!heldPending.length) {
+          heldPending = [];
+          updateHeldUI();
+          return;
+        }
+        window.pomodoro.reopenInteraction((heldPending[0] || {}).id);
+      });
+    }
     window.pomodoro.requestGatewayState();
 
     // 关于：版本号在第一次打开抽屉时取；检查更新是应用唯一的联网入口（手动触发）

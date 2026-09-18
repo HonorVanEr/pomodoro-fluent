@@ -19,8 +19,8 @@ Codex hooks ───────────┘
 |---|---|---|---|---|
 | ZCode | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.zcode/cli/config.json` |
 | Claude Code | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.claude/settings.json` |
-| VS Code Copilot | ✅ `vscode/askQuestions` | ⚠️ 挂在 `PreToolUse`（VS Code 无 `PermissionRequest`；默认只拦高风险工具，且**跟随宿主自己的自动批准设置**） | ✅ `Stop` | `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json` |
-| Trae | ✅ `AskUserQuestion` | ⚠️ 挂在 `PreToolUse`（无 `PermissionRequest`；matcher 可收窄 + 脚本兜底 + **跟随宿主的自动运行设置**） | ✅ `Notification` / `Stop` | `%userprofile%/.trae-cn/hooks.json` 或 `.trae/hooks.json` |
+| VS Code Copilot | ✅ `vscode/askQuestions` | ⚠️ 挂在 `PreToolUse`（VS Code 无 `PermissionRequest`；只处理提问，不做工具审批） | ✅ `Stop` | `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json` |
+| Trae | ✅ `AskUserQuestion` | ⚠️ 挂在 `PreToolUse`（无 `PermissionRequest`；只处理提问，matcher 收窄到提问工具） | ✅ `Notification` / `Stop` | `%userprofile%/.trae-cn/hooks.json` 或 `.trae/hooks.json` |
 | Cursor | ✅ `preToolUse` + `updated_input` | ✅ `beforeShellExecution` / `preToolUse` / `beforeMCPExecution` | ✅ | `~/.cursor/hooks.json` 或 `.cursor/hooks.json` |
 | OpenCode | ✅ `question.asked` | ✅ `permission.ask` | ✅ | 插件 + `opencode.json` |
 | Codex CLI | ❌ 无提问回调 | ✅ `PermissionRequest`（Codex 的独立权限事件，**只在它本来就要问时触发**） | ✅ 12 个事件 | `~/.codex/hooks.json` 或 `~/.codex/config.toml` 的内联 `[hooks]` |
@@ -54,10 +54,18 @@ Codex hooks ───────────┘
 | 操作 | 语义 | agent 那边发生什么 |
 |---|---|---|
 | 右上角 **×** | **交给终端**：这次不在弹窗里答了 | 拿到空决策 → 回退**宿主原生询问**（终端里再问你一次） |
-| 底部 **暂时收起，稍后从托盘处理** | **挂起**：这次交互还活着，只是把窗口收起来 | HTTP 长轮询**继续挂着**，agent 保持等待 |
+| 底部 **暂时收起，稍后处理** | **挂起**：这次交互还活着，只是把窗口收起来 | HTTP 长轮询**继续挂着**，agent 保持等待 |
 
-收起之后怎么找回来：**系统托盘图标 → 「待处理的确认（N）」**，点一下重新弹出；
-收起多条时菜单里会多一个「选择要处理的…」子菜单，托盘 tooltip 也会显示待处理条数。
+收起之后怎么找回来（三个入口，随便哪个都行）：
+
+1. **主窗口的确认提示条**——计时环下方会出现一条「权限 · Bash」样式的胶囊，点它就把那条重新弹出来；
+   收起多条时显示「N 条确认待处理」，点一次弹一条（最早收起的先回来）。
+2. **托盘左键单击**——有待处理确认时单击托盘图标 = 唤回最早收起的那条（没有待处理时单击不做任何事）。
+3. **托盘右键 →「待处理的确认（N）」**——收起多条时菜单里会多一个「选择要处理的…」子菜单，
+   托盘 tooltip 也会显示待处理条数。
+
+> 之所以做成三个入口：收起后弹窗是关闭状态，只留托盘一条路时，托盘图标一旦被 Win11
+> 折叠进溢出区就"找不着了"（等于丢了这次确认）。
 
 挂起**不影响兜底计时**——收起不等于有人管了，到点照样按上面的兜底策略收尾。
 
@@ -170,81 +178,6 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
   因为那个键可能已被你指向别的工具（例如 codex-computer-use）。
 
 改动需**重启 agent 会话**后生效（三端都是在会话启动时快照 hook 配置）。
-
-## 跟不跟随宿主的自动允许
-
-**问题从哪来**：VS Code 和 Trae 没有独立的 `PermissionRequest` 事件，审批只能挂在
-`PreToolUse` 上 —— 相当于在宿主自己的审批引擎前面又加了一层弹窗。如果不管宿主怎么配都弹，
-就会出现「你在宿主里设了自动运行/免确认，番茄钟还在问」的**误报**：配了自动运行却被反复
-打断，这层接管就从帮手变成净负担。
-
-**默认行为**：`PreToolUse` 拦截之前先读宿主自己的自动批准配置，**命中就不弹窗、也不回任何
-决策**，交回宿主原本的策略。判定只有三种：
-
-| 判定 | 含义 | 我们的动作 |
-|---|---|---|
-| `auto` | 宿主自己就会放行这个调用 | 不弹窗、**不输出任何决策** |
-| `ask` | 宿主本来也会问 | 拦，弹番茄钟窗（接管的价值在这） |
-| `unknown` | 读不到配置 / 规则没命中 | 按默认高风险工具名单**保守拦** |
-
-「不输出决策」不是越权：宿主仍会走它自己的审批逻辑，这一层只会**多问**、不会替宿主放行 ——
-所以跟随宿主不引入安全洞。
-
-读的是这些键（文件路径按平台自动找）：
-
-| 宿主 | 配置项 | 判定 |
-|---|---|---|
-| VS Code | `chat.tools.global.autoApprove` | `true` → 全部 `auto` |
-| VS Code | `chat.permissions.default` | `autoApprove` / `autopilot` → 全部 `auto` |
-| VS Code | `chat.tools.eligibleForAutoApproval` | 某工具 = `false` → 该工具**永远 `ask`**（优先级最高） |
-| VS Code | `chat.tools.terminal.enableAutoApprove` | `false` → 终端命令 `ask` |
-| VS Code | `chat.tools.terminal.autoApprove` | 命中 `true` 规则（且无 `false` 命中）→ `auto`；命中 `false` 规则 → `ask` |
-| VS Code | —（内置规则） | **只读命令**（`ls` / `cat` / `git status`…）→ `auto`；带 `>` 重定向、`-exec` / `-delete` 的不算只读 |
-| Trae | `AI.toolcall.v2.{ide,solo}.command.mode` | `alwaysRun` / `whitelist`（沙箱运行，支持白名单）/ `blacklist` 未命中 → `auto`；`alwaysAsk` → `ask` |
-| Trae | `AI.toolcall.v2.command.denyList` | 前缀命中 → `ask` |
-| Trae | `AI.toolcall.v2.{ide,solo}.mcp.autoRun` | 非 `alwaysAsk` → MCP 工具 `auto` |
-
-配置文件位置：
-
-- VS Code：用户级 `%APPDATA%\Code\User\settings.json`（另试 `Code - Insiders` / `Code - OSS` /
-  `VSCodium`），**工作区 `<项目>/.vscode/settings.json` 优先级更高**；
-- Trae：用户级 `%APPDATA%\TRAE SOLO CN\User\settings.json`（另试 `TRAE CN` / `Trae CN` / `Trae`），
-  工作区 `<项目>/.trae/settings.json`。
-- settings.json 允许注释和尾逗号（JSONC），CLI 直接解析。
-
-**自定义**：
-
-| 做什么 | 怎么做 |
-|---|---|
-| 关掉跟随，回到「一律按名单拦」 | `POMODORO_RESPECT_HOST_AUTO=0` |
-| 只拦某几类工具，不管宿主的设置 | `POMODORO_PRETOOL_APPROVE_TOOLS` 设成工具名正则，例如 `runinterminal`（显式设置后**不再跟随宿主**） |
-| 一个都不拦（只留提问弹窗） | `POMODORO_PRETOOL_APPROVE_TOOLS=""` |
-| 指定非标准安装位置 | `POMODORO_VSCODE_SETTINGS` / `POMODORO_TRAE_SETTINGS` 直接指到 settings.json<br>（只替换「用户级」的自动发现，工作区设置仍会叠加） |
-| 查「到底读到了什么、判定成什么」 | `node pomodoro-hook.js host-perms --source vscode --command "ls -la"` |
-
-`host-perms` 会打印读到的配置文件、关键键的值、宿主判定与最终是否拦截，不需要番茄钟在运行：
-
-```jsonc
-{
-  "source": "trae",
-  "tool": "RunCommand",
-  "command": "npm run build",
-  "settingsFiles": ["C:\\Users\\<你>\\AppData\\Roaming\\TRAE SOLO CN\\User\\settings.json"],
-  "hostSettings": { "AI.toolcall.v2.ide.command.mode": "whitelist" },
-  "hostDecision": { "state": "auto", "why": "命令运行方式 = 沙箱运行（支持白名单），命令由宿主自动执行" },
-  "intercept": false,
-  "reason": "跟随宿主自动允许：…"
-}
-```
-
-加 `POMODORO_DEBUG=1` 时，每次「因为跟随宿主而不拦」都会往 stderr 打一行原因，便于排查
-「配好了怎么不弹窗」。
-
-> 已知取舍：Trae 的 `whitelist` 选项在当前版本里叫「沙箱运行（支持白名单）」，官方描述是
-> 「命令在安全沙箱中自动执行，白名单命令可以绕过沙箱」—— 两条路都是自动执行，所以整体判定为
-> `auto`。如果你的 Trae 是旧版「使用白名单」语义（未命中白名单会问），把
-> `POMODORO_PRETOOL_APPROVE_TOOLS` 显式设成 `runcommand|bash|shell` 就能把这层拦回来。
-
 ## ZCode
 
 配置在 `~/.zcode/cli/config.json`，两个坑：必须 `hooks.enabled: true`，事件挂在 `hooks.events` 下（项目级 `.zcode/config.json` 当前版本不执行）。
@@ -327,37 +260,22 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
   如果 `~/.copilot/hooks` 没被加载，在设置里加一条 `"~/.copilot/hooks": true`。
 - 事件集只有 8 个：`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` /
   `PreCompact` / `SubagentStart` / `SubagentStop` / `Stop`。
-  ⚠️ **没有 `PermissionRequest`，也没有 `Notification`** —— 审批只能挂 `PreToolUse`，
-  "任务完成通知"只能挂 `Stop`。
+  ⚠️ **没有 `PermissionRequest`，也没有 `Notification`** —— 提问只能挂 `PreToolUse`
+  （2026-09-18 起不再做工具审批），"任务完成通知"只能挂 `Stop`。
 - ⚠️ **VS Code 会忽略 matcher**（官方原话："Currently, VS Code ignores matcher values"），
-  所有 hook 在每次工具调用时都会跑。所以「只拦高风险工具」的判断做在 CLI 里，
-  而不是靠 `"matcher"` 字段 —— 写 matcher 是没用的。
+  所有 hook 在每次工具调用时都会跑。PreToolUse 里非提问工具的调用只会静默上报活动，
+  不会弹审批窗。
 - ⚠️ **工具名和 Claude Code 完全不同**：VS Code 官方是 `run_in_terminal` / `create_file` /
   `replace_string_in_file` 这类**下划线**命名，工具入参也是 **camelCase**（`tool_input.filePath`），
   而 Claude Code 是 `Write` / `Bash` + `snake_case`（`tool_input.file_path`）。
-  CLI 会先把工具名归一化（去命名空间、去下划线、转小写）再匹配，所以
-  `run_in_terminal` 与 `runInTerminal` 等价，Claude harness 下叫 `Bash` 也一样拦得住。
-
-默认只拦这些高风险工具（归一化后匹配）：
-
-| 类别 | 工具 |
-|---|---|
-| 执行命令 / 终端 | `run_in_terminal` `runTerminalCommand` `runCommands` `runNotebookCell` `runTask` `runTests` `Bash` `Shell` |
-| 删除 / 移动类破坏性文件操作 | `delete_file` `rename_file` `move_files` `copy_files` `create_directory` `applyPatch` |
-
-用 `POMODORO_VSCODE_APPROVE_TOOLS` 改（正则，匹配的是归一化后的名字）：`.*` = 每个工具都问，空串 = 关闭审批。
-**普通文件编辑不拦**——那是 agent 的日常动作，全拦会变成弹窗轰炸；VS Code 自己的
-`chat.tools.edits.autoApprove` 管这件事。
 
 返回值与语义（`hookSpecificOutput`）：
 
 | 场景 | 返回 | 说明 |
 |---|---|---|
-| 你点了「允许」 | `permissionDecision: "allow"` | 放行 |
-| 你点了「拒绝」 | `permissionDecision: "deny"` + `permissionDecisionReason` | 阻止这次工具调用 |
-| **超时 / 关窗** | `permissionDecision: "ask"` | **强制走 VS Code 原生确认**。若这里「不返回决策」，VS Code 就按它自己的审批设置走 —— 你可能已经把终端设成免确认，等于被静默放行 |
-| 宿主自己就会自动批准的调用 | 不返回决策 | **跟随宿主**：命中 `chat.tools.global.autoApprove` / `chat.permissions.default` / `chat.tools.terminal.autoApprove` 的 `true` 规则，或本来就是只读命令 → 不再弹窗，交回 VS Code。见「[跟不跟随宿主的自动允许](#跟不跟随宿主的自动允许)」 |
-| 非高风险工具 | 不返回决策 | 交回 VS Code 正常流程，不越权 auto-approve |
+| 提问你点了选项 | `permissionDecision: "deny"` + `permissionDecisionReason` / `additionalContext` | 答案写给模型，模型据此继续 |
+| 提问超时 / 关窗 | 不返回决策 | 交回 VS Code 原生 QuickPick |
+| 普通工具调用 | 不返回决策 | 只静默上报活动，不弹审批窗（2026-09-18 起审批已移除） |
 | `Stop` | 什么都不返回 | **绝不能返回 `decision: "block"`**，那会阻止 agent 收尾（VS Code 的 `stop_hook_active` 就是防这个自循环的） |
 
 **提问弹窗（`vscode/askQuestions`）**：与 Claude Code 不同，VS Code 的提问工具弹的是 QuickPick，
@@ -414,7 +332,7 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 |---|---|---|
 | `SessionStart` | 注入上下文（`additionalContext`） | 记会话开始 |
 | `UserPromptSubmit` | `decision: block` 拦截 / 附上下文 | 记任务提示词 |
-| `PreToolUse` | **`permissionDecision` allow/deny/ask + `updatedInput`** | **提问 + 审批走这里** |
+| `PreToolUse` | **`permissionDecision` + `updatedInput`** | **提问走这里**（2026-09-18 起不做工具审批） |
 | `PostToolUse` | `decision: block` 校验结果 | 工具计数 |
 | `Stop` | `decision: block` 阻止收尾（可配 `loop_limit`） | 只上报，**不阻断** |
 | `Notification` | 异步通知，**不改变流程** | 弹通知窗（含 `permission_prompt` / `idle_prompt`） |
@@ -422,21 +340,16 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 - 配置位置：全局 `%userprofile%/.trae-cn/hooks.json`（`install --agent trae` 会写这里），
   或界面里 设置 > Hooks 创建；项目级 `$PROJECT/.trae/hooks.json`。
 - `timeout` 单位是**秒**、默认 30 → `PreToolUse` 显式设 4200，否则等你点弹窗的工夫它就被掐了。
-- **`matcher` 在 Trae 上是真生效的**（仅限 `PreToolUse` / `PostToolUse` / `Notification`），
-  所以 PreToolUse 用 `RunCommand|Bash|Shell|DeleteFile|…` 先把普通工具挡在外面，
-  脚本里的高风险判断只作兜底。
+- **`matcher` 在 Trae 上是真生效的**（仅限 `PreToolUse` / `PostToolUse` / `Notification`）。
+  2026-09-18 起不做工具审批，PreToolUse 的 matcher 收窄到 `AskUserQuestion`（只处理提问），
+  活动上报交给 `PostToolUse`。
 - Trae 的工具名：`Read` `Write` `Edit` `Glob` `Grep` `LS` **`RunCommand`** `WebSearch`
   `WebFetch` `AskUserQuestion` `Skill` `mcp__<server>__<tool>`。
-  归一化后 `RunCommand` 命中默认的终端类拦截规则，不用额外配。
 - 输入字段是 **snake_case**：`session_id` `cwd` `hook_event_name` `workspace_roots`
   `tool_use_id` `tool_name` `llm_tool_name` `tool_input`；Stop 多一个 `stop_hook_active`，
   Notification 多 `notification_type` / `message`。上下文里的项目名走 `workspace_roots[0]`。
-- 未决策（超时 / 关窗）时和 VS Code 一样返回 **`permissionDecision: "ask"`**，
-  强制走 Trae 原生确认，绝不静默放行；非高风险工具不返回决策。
-- **跟随宿主的自动运行设置**：读 `AI.toolcall.v2.{ide,solo}.command.mode` ——
-  `alwaysRun`（自动运行）/ `whitelist`（沙箱运行，支持白名单）/ `blacklist`（未命中黑名单）
-  都判为宿主自己会执行 → **不拦**；只有 `alwaysAsk`（手动运行）才拦，
-  `denyList` 命中时也拦。详见「[跟不跟随宿主的自动允许](#跟不跟随宿主的自动允许)」。
+- 提问未决策（超时 / 关窗）时不返回决策，交回 Trae 原生流程；
+  普通工具调用一律静默上报，不弹审批窗（2026-09-18 起审批已移除）。
 - ⚠️ **必须选「本地自动运行」**：Trae 创建 Hook 时会让你在「沙箱运行」和「本地自动运行」
   之间选。沙箱会限制系统权限，hook 很可能连不上本机 `127.0.0.1:5277` 的番茄钟网关；
   连不上时 CLI 是**静默跳过**的（不阻断 agent），表现就是"配了但没弹窗"。
@@ -556,8 +469,7 @@ PreToolUse hook returned unsupported permissionDecision:ask
 `PreToolUse` 只上报活动、绝不回决策。
 
 好在 Codex 的 `PermissionRequest` **只在「Codex 本来就要问用户」时才触发**（不需要审批的
-调用不跑），条件比 `PreToolUse` 精确得多。因此 Codex **也不需要** VS Code / Trae 那套
-「跟随宿主自动允许」的猜测 —— Codex 自己已经判断过要不要问了。
+调用不跑）—— Codex 自己已经判断过要不要问了，不需要额外配置。
 
 **2）`updatedPermissions` 在 Codex 上会让整条答复失败。**
 
@@ -700,13 +612,6 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 | `POMODORO_SOURCE` | 自动 | `zcode` / `claude-code` / `opencode` / `vscode` / `cursor` / `codex` / `qwen`（install 生成的命令会自动带 `--source`） |
 | `POMODORO_ASK` | 1 | 是否接管 `AskUserQuestion` / `askQuestions` |
 | `POMODORO_PERMISSION` | 1 | 是否接管权限请求 |
-| `POMODORO_CONFIRM_PRETOOL` | 0 | 1 = 普通 PreToolUse 也弹双向确认（建议只对 `Bash` 这类高风险工具开） |
-| `POMODORO_RESPECT_HOST_AUTO` | 1 | 1 = **跟随宿主自己的自动允许设置**：VS Code / Trae 下先读宿主的自动批准配置，命中就不弹窗、不回决策（详见「[跟不跟随宿主的自动允许](#跟不跟随宿主的自动允许)」）。0 = 回到「一律按名单拦」 |
-| `POMODORO_VSCODE_SETTINGS` | 自动发现 | 直接指定 VS Code 的 `settings.json`（只替换用户级自动发现，工作区 `.vscode/settings.json` 仍会叠加） |
-| `POMODORO_TRAE_SETTINGS` | 自动发现 | 直接指定 Trae 的 `settings.json`（同上） |
-| `POMODORO_DEBUG` | 0 | 1 = 把 PreToolUse「因为跟随宿主而不拦」的原因打到 stderr |
-| `POMODORO_PRETOOL_APPROVE_TOOLS` | 高风险工具正则 | 没有 `PermissionRequest` 的宿主（VS Code / Trae）下走 `PreToolUse` 审批的工具范围，匹配**归一化后**的工具名（`.*` 全拦，空串关闭）。**显式设置后不再跟随宿主** |
-| `POMODORO_VSCODE_APPROVE_TOOLS` | 同上 | 旧名字，仍兼容 |
 | `POMODORO_LOCAL_ALWAYS_ALLOW` | 1 | 0 关闭本地「始终允许」规则缓存（VS Code / Cursor 不支持规则回写，靠它落地） |
 | `POMODORO_ALWAYS_ALLOW` | 1 | 0 隐藏「始终允许」按钮 |
 | `POMODORO_PERMISSION_DEST` | projectSettings | 「始终允许」写进哪份配置 |
@@ -727,9 +632,9 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 - 除 `/health` 外全部要求随机 token（每次启动重新生成，存于本机 `gateway.json`）；
 - 校验 `Host` 头，仅接受 `127.0.0.1` / `localhost`，防 DNS rebinding；
 - 浏览器页面因无 CORS 头也无法读取响应；
-- 超时/关闭一律落回**拒绝或不决策**，绝不替宿主放行。注意「不决策」有两种来源：
-  一是该调用不在拦截范围，二是**宿主自己就会放行**（跟随宿主，见上）—— 两种都由宿主自己的
-  审批设置决定结果，CLI 不会替它说 allow；
+- 超时/关闭一律落回**拒绝或不决策**，绝不替宿主放行。注意「不决策」：
+  提问超时就交回宿主原生 UI，普通工具调用本就静默上报 —— 结果都由宿主自己的
+  审批设置决定，CLI 不会替它说 allow；
 
 ## 自测
 

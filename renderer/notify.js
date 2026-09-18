@@ -171,8 +171,8 @@ function renderHoldRow() {
   const btn = document.createElement('button');
   btn.className = 'notify-hold';
   btn.type = 'button';
-  btn.textContent = '暂时收起，稍后从托盘处理';
-  btn.title = '收起后 agent 继续等你，点托盘图标的「待处理的确认」可以再打开';
+  btn.textContent = '暂时收起，稍后处理';
+  btn.title = '收起后这次确认不会丢，agent 继续等你：点托盘图标，或用主窗口里的确认提示条可以重新打开';
   btn.addEventListener('click', (e) => {
     e.stopPropagation();
     hold();
