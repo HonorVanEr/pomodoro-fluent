@@ -138,93 +138,94 @@
     <div class="drawer-backdrop" id="drawerBackdrop"></div>
     <div class="drawer-panel">
       <div class="drawer-head">
-        <span>时长设置</span>
+        <span>设置</span>
         <button class="drawer-close" id="drawerClose">
           <svg viewBox="0 0 16 16" width="13" height="13" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l10 10M13 3L3 13"/></svg>
         </button>
       </div>
-      <div class="setting-row">
-        <label for="sWork">专注 (分钟)</label>
-        <input type="number" id="sWork" min="1" max="120" value="25" />
-      </div>
-      <div class="setting-row">
-        <label for="sBreak">短休 (分钟)</label>
-        <input type="number" id="sBreak" min="1" max="60" value="5" />
-      </div>
-      <div class="setting-row">
-        <label for="sLong">长休 (分钟)</label>
-        <input type="number" id="sLong" min="1" max="120" value="15" />
-      </div>
-      <div class="setting-row">
-        <label for="sRounds">长休间隔 (轮)</label>
-        <input type="number" id="sRounds" min="1" max="8" value="4" />
-      </div>
-      <div class="setting-row toggle-row">
-        <label for="sAuto">自动进入下一阶段</label>
-        <label class="switch">
-          <input type="checkbox" id="sAuto" />
-          <span class="slider"></span>
-        </label>
-      </div>
-
-      <div class="drawer-divider"></div>
-      <div class="drawer-section-title">Agent 集成</div>
-      <div class="setting-row toggle-row">
-        <label for="sGateway">启用 Agent 网关</label>
-        <label class="switch">
-          <input type="checkbox" id="sGateway" />
-          <span class="slider"></span>
-        </label>
-      </div>
-      <div class="setting-row agent-row">
-        <span class="agent-meta" id="agentMeta">检测中…</span>
-        <select id="agentSelect" class="agent-select" title="选择要生成配置的 agent">
-          <option value="zcode">ZCode</option>
-          <option value="claude">Claude Code</option>
-          <option value="vscode">VS Code Copilot</option>
-          <option value="trae">Trae</option>
-          <option value="cursor">Cursor</option>
-          <option value="opencode">OpenCode</option>
-          <option value="codex">Codex CLI</option>
-          <option value="qwen">Qwen Code</option>
-        </select>
-      </div>
-      <div class="setting-row agent-row">
-        <button class="copy-btn" id="btnCopyHook" title="复制所选 agent 的 hook 配置片段">复制配置</button>
-        <button class="copy-btn" id="btnCopyInstall" title="复制一键安装命令（在本机终端执行）">复制安装命令</button>
-      </div>
-      <div class="setting-row agent-row">
-        <button class="copy-btn primary" id="btnInstallHook" title="直接在本机写入所选 agent 的 hook 配置（原文件自动备份）">一键安装</button>
-        <label class="install-clean" title="同时清掉指向番茄钟 hook 其它副本的旧条目，避免同一事件跑两遍">
-          <input type="checkbox" id="installClean" checked />
-          <span>清理旧条目</span>
-        </label>
-      </div>
-      <div class="install-result" id="installResult" hidden></div>
-
-      <div class="drawer-divider"></div>
-      <div class="drawer-section-title">关于</div>
-      <div class="about-card">
-        <div class="about-icon">
-          <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2v6M12 2C6 2 3 6 3 9c0 2 1.5 3 3 3 2 0 3-1 3-3 0-2-1-4-2.2-5C8 4.6 9.5 4 12 4"/>
-            <path d="M12 2c6 0 9 4 9 7 0 2-1.5 3-3 3-2 0-3-1-3-3 0-2 1-4 2.2-5C16 4.6 14.5 4 12 4"/>
-            <path d="M12 4v2"/>
-            <path d="M12 8v1"/>
-            <path d="M12 22c-4 0-6-2-6-4 0-2 2-3 6-3s6 1 6 3c0 2-2 4-6 4z"/>
-          </svg>
+      <div class="drawer-body">
+        <div class="setting-row">
+          <label for="sWork">专注 (分钟)</label>
+          <input type="number" id="sWork" min="1" max="120" value="25" />
         </div>
-        <div class="about-body">
-          <div class="about-name">番茄钟 <span class="about-version" id="aboutVersion">—</span></div>
-          <div class="about-meta" id="aboutMeta">读取版本信息…</div>
-          <div class="about-links">
-            <button class="copy-btn small" id="btnCheckUpdate" title="查一次 GitHub 上的最新版本（只有点这里时才联网）">检查更新</button>
-            <button class="copy-btn small" id="btnOpenRepo" title="打开项目主页 / 所有版本">项目主页</button>
+        <div class="setting-row">
+          <label for="sBreak">短休 (分钟)</label>
+          <input type="number" id="sBreak" min="1" max="60" value="5" />
+        </div>
+        <div class="setting-row">
+          <label for="sLong">长休 (分钟)</label>
+          <input type="number" id="sLong" min="1" max="120" value="15" />
+        </div>
+        <div class="setting-row">
+          <label for="sRounds">长休间隔 (轮)</label>
+          <input type="number" id="sRounds" min="1" max="8" value="4" />
+        </div>
+        <div class="setting-row toggle-row">
+          <label for="sAuto">自动进入下一阶段</label>
+          <label class="switch">
+            <input type="checkbox" id="sAuto" />
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div class="drawer-divider"></div>
+        <div class="drawer-section-title">Agent 集成</div>
+        <div class="setting-row toggle-row">
+          <label for="sGateway">启用 Agent 网关</label>
+          <label class="switch">
+            <input type="checkbox" id="sGateway" />
+            <span class="slider"></span>
+          </label>
+        </div>
+        <div class="setting-row agent-row">
+          <span class="agent-meta" id="agentMeta">检测中…</span>
+          <select id="agentSelect" class="agent-select" title="选择要生成配置的 agent">
+            <option value="zcode">ZCode</option>
+            <option value="claude">Claude Code</option>
+            <option value="vscode">VS Code Copilot</option>
+            <option value="trae">Trae</option>
+            <option value="cursor">Cursor</option>
+            <option value="opencode">OpenCode</option>
+            <option value="codex">Codex CLI</option>
+            <option value="qwen">Qwen Code</option>
+          </select>
+        </div>
+        <div class="setting-row agent-row">
+          <button class="copy-btn" id="btnCopyHook" title="复制所选 agent 的 hook 配置片段">复制配置</button>
+          <button class="copy-btn" id="btnCopyInstall" title="复制一键安装命令（在本机终端执行）">复制安装命令</button>
+        </div>
+        <div class="setting-row agent-row">
+          <button class="copy-btn primary" id="btnInstallHook" title="直接在本机写入所选 agent 的 hook 配置（原文件自动备份）">一键安装</button>
+          <label class="install-clean" title="同时清掉指向番茄钟 hook 其它副本的旧条目，避免同一事件跑两遍">
+            <input type="checkbox" id="installClean" checked />
+            <span>清理旧条目</span>
+          </label>
+        </div>
+        <div class="install-result" id="installResult" hidden></div>
+
+        <div class="drawer-divider"></div>
+        <div class="drawer-section-title">关于</div>
+        <div class="about-card">
+          <div class="about-icon">
+            <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M12 2v6M12 2C6 2 3 6 3 9c0 2 1.5 3 3 3 2 0 3-1 3-3 0-2-1-4-2.2-5C8 4.6 9.5 4 12 4"/>
+              <path d="M12 2c6 0 9 4 9 7 0 2-1.5 3-3 3-2 0-3-1-3-3 0-2 1-4 2.2-5C16 4.6 14.5 4 12 4"/>
+              <path d="M12 4v2"/>
+              <path d="M12 8v1"/>
+              <path d="M12 22c-4 0-6-2-6-4 0-2 2-3 6-3s6 1 6 3c0 2-2 4-6 4z"/>
+            </svg>
+          </div>
+          <div class="about-body">
+            <div class="about-name">番茄钟 <span class="about-version" id="aboutVersion">—</span></div>
+            <div class="about-meta" id="aboutMeta">读取版本信息…</div>
+            <div class="about-links">
+              <button class="copy-btn small" id="btnCheckUpdate" title="查一次 GitHub 上的最新版本（只有点这里时才联网）">检查更新</button>
+              <button class="copy-btn small" id="btnOpenRepo" title="打开项目主页 / 所有版本">项目主页</button>
+            </div>
           </div>
         </div>
+        <div class="update-result" id="updateResult" hidden></div>
       </div>
-      <div class="update-result" id="updateResult" hidden></div>
-
       <button class="drawer-save" id="drawerSave">保存设置</button>
     </div>
   </div>

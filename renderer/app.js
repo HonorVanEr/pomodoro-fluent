@@ -567,6 +567,20 @@ const PomodoroApp = (() => {
     setTimeout(() => { btn.textContent = btn.dataset.label; }, ms);
   }
 
+  // 结果面板右上角的关闭按钮：一键安装 / 检查更新的提示与报错都能手动点掉，
+  // 不用干等下一次操作把它覆盖（面板内容全部由 JS 生成，按钮也在这里挂）
+  function addResultClose(box) {
+    const btn = el('button', 'result-close', '×');
+    btn.type = 'button';
+    btn.title = '关闭';
+    btn.setAttribute('aria-label', '关闭这条提示');
+    btn.addEventListener('click', () => {
+      box.hidden = true;
+      box.innerHTML = '';
+    });
+    box.appendChild(btn);
+  }
+
   function renderInstallResult(res) {
     const box = dom.installResult;
     if (!box) return;
@@ -614,6 +628,8 @@ const PomodoroApp = (() => {
       d.appendChild(el('pre', '', res.log));
       box.appendChild(d);
     }
+
+    addResultClose(box);
   }
 
   // ---- 关于 / 检查更新 ----
@@ -623,6 +639,7 @@ const PomodoroApp = (() => {
     box.innerHTML = '';
     if (!nodes || !nodes.length) { box.hidden = true; return; }
     nodes.forEach((n) => box.appendChild(n));
+    addResultClose(box);
     box.hidden = false;
   }
 
