@@ -460,7 +460,14 @@ html, body {
 .drawer-panel {
   position: absolute;
   left: 0; right: 0; bottom: 0;
-  padding: 18px 20px 24px;
+  /* 抽屉最高只能到窗口顶：内容再长也是内部滚动，不能让面板顶穿窗口 */
+  max-height: 100%;
+  /* 纵向 flex：标题栏 + 可滚动内容区 + 保存按钮，标题和按钮常驻不滚走 */
+  display: flex;
+  flex-direction: column;
+  /* 内边距下放到 head / body / save 各自身上，滚动条才能贴着面板右缘走 */
+  padding: 0;
+  overflow: hidden;
   /* 与主卡片同族的微渐变底色，避免抽屉弹开后底色断层 */
   background: linear-gradient(178deg,
     rgba(27, 29, 39, 0.98) 0%,
@@ -476,10 +483,36 @@ html, body {
 .settings-drawer.open .drawer-backdrop { opacity: 1; pointer-events: auto; }
 .settings-drawer.open .drawer-panel { transform: translateY(0); }
 
+/* 抽屉内容区：超出高度时出滚动条；scrollbar-gutter 常驻，
+   这样有没有滚动条，内容宽度都一样（不会跟标题栏左右错位） */
+.drawer-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 0 12px 4px 20px;
+}
+.drawer-body::-webkit-scrollbar { width: 8px; }
+.drawer-body::-webkit-scrollbar-track { background: transparent; }
+.drawer-body::-webkit-scrollbar-thumb {
+  /* 2px 透明边框 + padding-box 裁切 = 可见拇指只剩 4px，细而不糊 */
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+  background-clip: padding-box;
+}
+.drawer-body::-webkit-scrollbar-thumb:hover {
+  background: rgba(255, 255, 255, 0.36);
+  background-clip: padding-box;
+}
+
 .drawer-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: center;
   justify-content: space-between;
+  padding: 18px 20px 0;
   font-size: 14px;
   font-weight: 600;
   margin-bottom: 16px;
@@ -559,8 +592,10 @@ input[type="number"]::-webkit-inner-spin-button {
 }
 
 .drawer-save {
-  width: 100%;
-  margin-top: 6px;
+  /* 列向 flex + stretch 已经撑满，再写 width:100% 会和左右 margin 一起溢出 */
+  flex: 0 0 auto;
+  width: auto;
+  margin: 10px 20px 24px;
   padding: 10px;
   border: none;
   border-radius: 9px;
@@ -688,6 +723,7 @@ input[type="number"]::-webkit-inner-spin-button {
 
 /* 检查结果（沿用一键安装结果的观感） */
 .update-result {
+  position: relative;
   margin: 8px 0 0;
   padding: 10px 12px;
   border: 1px solid var(--card-border);
@@ -722,6 +758,7 @@ input[type="number"]::-webkit-inner-spin-button {
 
 /* ---------- 一键安装结果 ---------- */
 .install-result {
+  position: relative;
   margin: 0 0 10px;
   padding: 10px 12px;
   border: 1px solid var(--card-border);
@@ -778,6 +815,31 @@ input[type="number"]::-webkit-inner-spin-button {
   white-space: pre-wrap;
   word-break: break-all;
 }
+
+/* 结果面板右上角的关闭按钮（一键安装 / 检查更新共用，点一下收起提示） */
+.result-close {
+  position: absolute;
+  top: 5px;
+  right: 5px;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border: none;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text-faint);
+  font-family: inherit;
+  font-size: 14px;
+  line-height: 1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+.result-close:hover { background: var(--surface-hover); color: var(--text); }
+.result-close:active { transform: scale(0.9); }
+/* 给关闭按钮让出位置，免得长标题压到它下面 */
+.install-head, .update-head { padding-right: 20px; }
 
 .agent-select {
   flex: 0 0 auto;
