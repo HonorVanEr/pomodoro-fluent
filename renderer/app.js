@@ -464,8 +464,8 @@ const PomodoroApp = (() => {
     }
     if (agent === 'vscode') {
       // VS Code Copilot Agent hooks：与 Claude Code 同格式，用户级放 ~/.copilot/hooks/*.json。
-      // 只有 8 个事件（无 PermissionRequest / Notification），审批走 PreToolUse；
-      // VS Code 会忽略 matcher，只拦高风险工具的判断在 CLI 里做。
+      // 只有 8 个事件（无 PermissionRequest / Notification），提问走 PreToolUse
+      // （2026-09-18 起不再做工具审批）；VS Code 会忽略 matcher。
       // timeout 单位是秒、默认只有 30 → 要等弹窗就必须显式调大。
       // 4200s 是给「三层嵌套」留的余量：番茄钟兜底 3600s → hook 等网关 3900s → 宿主 4200s。
       return JSON.stringify({
@@ -484,13 +484,13 @@ const PomodoroApp = (() => {
     }
     if (agent === 'trae') {
       // Trae：全局 %userprofile%/.trae-cn/hooks.json，Claude Code 那种嵌套格式。
-      // 6 个事件（有 Notification，无 PermissionRequest）→ 审批挂 PreToolUse。
-      // 与 VS Code 不同：Trae 的 matcher 真的生效，所以先用它把普通工具挡在外面。
+      // 6 个事件（有 Notification，无 PermissionRequest）→ 提问挂 PreToolUse
+      // （2026-09-18 起不再做工具审批，matcher 只匹配提问工具，活动上报走 PostToolUse）。
       return JSON.stringify({
         version: 1,
         hooks: {
           PreToolUse: [{
-            matcher: 'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile',
+            matcher: 'AskUserQuestion',
             hooks: [{ type: 'command', command: cmd('trae'), timeout: 4200 }],
           }],
           Notification: [{ hooks: [{ type: 'command', command: cmd('trae'), timeout: 30 }] }],

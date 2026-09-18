@@ -32,13 +32,6 @@
 //   POMODORO_SOURCE            来源标记：zcode | claude-code | opencode | vscode | trae | cursor | codex | qwen
 //   POMODORO_ASK               1/0，AskUserQuestion 是否接管（默认 1）
 //   POMODORO_PERMISSION        1/0，PermissionRequest 是否接管（默认 1）
-//   POMODORO_CONFIRM_PRETOOL   1 开启普通 PreToolUse 双向确认（默认 0）
-//   POMODORO_PRETOOL_APPROVE_TOOLS  没有 PermissionRequest 的宿主（VS Code / Trae）
-//                              下走 PreToolUse 审批的工具正则，匹配前会先把工具名
-//                              归一化（去命名空间/下划线/大小写），所以 run_in_terminal、
-//                              runInTerminal、RunCommand 等价。（默认只拦终端执行与
-//                              删除/移动类破坏性工具；`.*` = 每个工具都问；空串 = 关闭）
-//   POMODORO_VSCODE_APPROVE_TOOLS   同上，兼容旧名
 //   POMODORO_LOCAL_ALWAYS_ALLOW 0 关闭本地「始终允许」规则缓存
 //                              （VS Code / Trae / Cursor 不支持规则回写，靠它落地，默认 1）
 //   POMODORO_ALWAYS_ALLOW      0 隐藏「始终允许」按钮（默认 1）
@@ -540,437 +533,16 @@ function detectProtocol(payload) {
   return 'ancli';
 }
 
-// VS Code Copilot 与 Trae 都没有独立权限事件（VS Code 8 个 / Trae 6 个事件），
-// 审批只能挂在 PreToolUse 上。而 PreToolUse 对**每个**工具调用都会触发，全拦
-// 会变成弹窗轰炸 → 默认只拦高风险工具，且判断放在脚本里做（VS Code 会忽略
-// matcher，Trae 的 matcher 只在 PreToolUse/PostToolUse/Notification 上有效，
-// 不能只靠它）。
-//
-// 工具名归一化后再比对：VS Code 用 run_in_terminal / create_file，Trae 用
-// RunCommand，Claude harness 里又是 Bash —— 归一化后一网打尽。
-const PRETOOL_APPROVAL_SOURCES = new Set(['vscode', 'trae']);
-
 // Codex（codex-cli 0.154.0 实测）：审批**只走 PermissionRequest**，不在 PreToolUse 上拦。
 // 依据是实机 bundle 里的原话 —— PreToolUse 只强制执行 deny，其余值都被解析但不生效：
 //   PreToolUse hook returned unsupported permissionDecision:allow
 //   PreToolUse hook returned unsupported permissionDecision:ask
 // 所以在 PreToolUse 上回 allow/ask 等于什么都没回，宿主照样走自己的审批 → 那次审批
 // 又会触发 PermissionRequest → 弹两次窗。而且 Codex 的 PermissionRequest 只在
-// 「Codex 本来就要问用户」时才触发（不需要审批的调用不跑），条件比 PreToolUse 精确得多，
-// 因此也不需要 VS Code / Trae 那套「跟随宿主自动允许」的猜测。
+// 「Codex 本来就要问用户」时才触发（不需要审批的调用不跑），条件比 PreToolUse 精确得多。
+// （2026-09-18 起 PreToolUse 整体不再做审批 —— 所有宿主都只在这里处理提问与活动上报。）
 const PERMISSION_EVENT_ONLY_SOURCES = new Set(['codex']);
 
-const VSCODE_APPROVE_DEFAULT = [
-  // 执行命令 / 终端
-  'runinterminal', 'runterminalcommand', 'runcommand', 'runcommands',
-  'runcommandsinterminal', 'runnotebookcell', 'runtask', 'runtests',
-  'executecommand', 'bash', 'shell', 'terminal',
-  // 删除 / 移动类破坏性文件操作
-  'deletefile', 'deletefiles', 'removefile', 'removefiles',
-  'renamefile', 'renamefiles', 'movefiles', 'movefile',
-  'copyfiles', 'copyfile', 'createdirectory', 'applypatch',
-].join('|');
-
-// ---------------------------------------------------------------------------
-// 跟随宿主的自动允许设置
-//
-// 为什么要有这段：VS Code / Trae 没有独立的权限事件，我们等于是在宿主的审批引擎
-// 前面又加了一层弹窗。如果不管宿主怎么配都弹，「宿主已经设了自动允许、番茄钟还
-// 在问」就成了误报 —— 用户明明配了自动运行/免确认，却被反复打断，这层接管就从
-// 帮手变成了净负担。
-//
-// 所以拦截之前先读宿主自己的配置，只拦「宿主本来也会问」的调用：
-//   VS Code  chat.tools.global.autoApprove / chat.permissions.default
-//            chat.tools.terminal.enableAutoApprove / chat.tools.terminal.autoApprove
-//            chat.tools.eligibleForAutoApproval
-//   文件     用户级 %APPDATA%/Code/User/settings.json（含 Insiders / VSCodium），
-//            工作区 <cwd>/.vscode/settings.json（优先级更高）
-//   Trae     AI.toolcall.v2.{ide,solo}.command.mode
-//              alwaysAsk = 手动运行 / whitelist = 沙箱运行（支持白名单）
-//              / blacklist = 黑名单 / alwaysRun = 自动运行
-//            AI.toolcall.v2.command.allowList / denyList
-//            AI.toolcall.v2.{ide,solo}.mcp.autoRun
-//   文件     用户级 %APPDATA%/TRAE SOLO CN/User/settings.json（另有几个旧目录名兜底）
-//
-// 判定只有三种：
-//   auto    宿主自己就会放行 → 不弹窗、**不回任何决策**，交回宿主原本的策略
-//   ask     宿主会问 → 拦（这才是接管的价值所在）
-//   unknown 读不到 / 规则没命中 → 按默认高风险名单保守拦
-//
-// 注意「不回决策」不是越权：宿主仍会走自己的审批逻辑。这一层只会**多问**，不会
-// 替宿主放行 —— 所以跟随宿主不会引入安全洞。
-//
-// 关掉跟随：POMODORO_RESPECT_HOST_AUTO=0
-// 查当前判定：node pomodoro-hook.js host-perms --source vscode --command "ls -la"
-// ---------------------------------------------------------------------------
-const TERMINAL_TOOL_SET = new Set([
-  'runinterminal', 'runterminalcommand', 'runcommands', 'runcommand',
-  'runcommandsinterminal', 'executecommand', 'runnotebookcell',
-  'bash', 'shell', 'terminal',
-]);
-
-// ---- JSONC（VS Code / Trae 的 settings.json 都允许注释与尾逗号）----
-function stripJsonc(text) {
-  let out = '';
-  let inStr = false;
-  let inLine = false;
-  let inBlock = false;
-  for (let i = 0; i < text.length; i++) {
-    const c = text[i];
-    const next = text[i + 1];
-    if (inLine) { if (c === '\n') { inLine = false; out += c; } continue; }
-    if (inBlock) { if (c === '*' && next === '/') { inBlock = false; i++; } continue; }
-    if (inStr) {
-      out += c;
-      if (c === '\\') { out += next === undefined ? '' : next; i++; }
-      else if (c === '"') inStr = false;
-      continue;
-    }
-    if (c === '"') { inStr = true; out += c; continue; }
-    if (c === '/' && next === '/') { inLine = true; i++; continue; }
-    if (c === '/' && next === '*') { inBlock = true; i++; continue; }
-    out += c;
-  }
-  return out.replace(/,(\s*[}\]])/g, '$1');
-}
-
-function readJsoncFile(file) {
-  try {
-    const obj = JSON.parse(stripJsonc(fs.readFileSync(file, 'utf8')));
-    return obj && typeof obj === 'object' && !Array.isArray(obj) ? obj : null;
-  } catch (e) { return null; }
-}
-
-// ---- 宿主配置文件位置 ----
-const VSCODE_USER_DIRS = ['Code', 'Code - Insiders', 'Code - OSS', 'VSCodium'];
-// 本机装的是新版（TRAE SOLO CN）；旧目录名一并兜底，避免升级过的机器读不到
-const TRAE_USER_DIRS = ['TRAE SOLO CN', 'TRAE CN', 'Trae CN', 'Trae'];
-
-function hostConfigRoots() {
-  const home = os.homedir();
-  if (process.platform === 'win32') {
-    return { appData: env.APPDATA || path.join(home, 'AppData', 'Roaming'), home };
-  }
-  if (process.platform === 'darwin') {
-    return { appData: path.join(home, 'Library', 'Application Support'), home };
-  }
-  return { appData: path.join(home, '.config'), home };
-}
-
-// 返回 { values, files }：values 是合并后的设置项，files 是真正读到内容的文件
-function hostSettings(source, cwd) {
-  const src = String(source || '');
-  const roots = hostConfigRoots();
-  const override = src === 'vscode' ? env.POMODORO_VSCODE_SETTINGS : env.POMODORO_TRAE_SETTINGS;
-  const candidates = [];
-  if (override) {
-    candidates.push(override);
-  } else if (src === 'vscode') {
-    for (const d of VSCODE_USER_DIRS) candidates.push(path.join(roots.appData, d, 'User', 'settings.json'));
-  } else {
-    for (const d of TRAE_USER_DIRS) candidates.push(path.join(roots.appData, d, 'User', 'settings.json'));
-    candidates.push(path.join(roots.home, '.trae-cn', 'User', 'settings.json'));
-  }
-
-  const values = {};
-  const files = [];
-  // 用户级：多个候选目录按顺序读，先命中的优先（主流目录名排在前面）
-  for (const f of candidates) {
-    const obj = readJsoncFile(f);
-    if (!obj) continue;
-    files.push(f);
-    for (const k of Object.keys(obj)) if (!(k in values)) values[k] = obj[k];
-  }
-  // 工作区级优先级更高。注意：POMODORO_*_SETTINGS 只替换「用户级」的自动发现，
-  // 工作区设置仍然叠加在最上面（否则覆盖路径的人会丢掉工作区配置）
-  if (cwd) {
-    const wsFile = src === 'vscode'
-      ? path.join(cwd, '.vscode', 'settings.json')
-      : path.join(cwd, '.trae', 'settings.json');
-    const obj = readJsoncFile(wsFile);
-    if (obj) {
-      files.push(wsFile);
-      Object.assign(values, obj);
-    }
-  }
-  return { values, files };
-}
-
-// ---- 命令内容与拆分 ----
-function commandOf(toolInput) {
-  if (!toolInput || typeof toolInput !== 'object') return '';
-  return String(toolInput.command || toolInput.cmd || toolInput.commandLine || toolInput.command_line || '');
-}
-
-// VS Code 的规则按「子命令」匹配，所以复合命令要拆开。引号里的 | 也会被拆，
-// 属启发式误差；多拆只会让判定更保守，不会更宽松。
-function splitCommands(cmd) {
-  return String(cmd || '')
-    .split(/\r?\n|&&|\|\||[;|]/)
-    .map((s) => s.trim())
-    .filter(Boolean);
-}
-
-// 只读命令：宿主（VS Code 内置规则 / Trae 沙箱）默认就放行，不该拦。
-// 名单故意收得很紧，且一律要求「无重定向、无 -exec/-delete」。
-const READONLY_CMDS = {
-  ls: true, dir: true, pwd: true, cd: true, cat: true, type: true, head: true,
-  tail: true, wc: true, sort: true, uniq: true, tree: true, which: true, where: true,
-  whoami: true, hostname: true, uname: true, date: true, printenv: true,
-  ipconfig: true, netstat: true, tasklist: true, systeminfo: true, df: true, du: true,
-  stat: true, file: true, basename: true, dirname: true, realpath: true,
-  readlink: true, grep: true, findstr: true, rg: true, less: true, more: true,
-  echo: true,
-  // 只列真正只读的子命令：git branch / git remote / git stash / git config 都能改状态
-  git: ['status', 'log', 'diff', 'show', 'describe', 'rev-parse', 'ls-files', 'ls-remote', 'blame', 'shortlog'],
-  npm: ['ls', 'list', 'view', 'outdated', 'explain', 'why', 'ping'],
-  pnpm: ['list', 'ls'],
-  yarn: ['list', 'info'],
-  pip: ['list', 'show', 'freeze'],
-  cargo: ['tree', 'metadata'],
-  docker: ['ps', 'images', 'version'],
-  node: [], python: [], python3: [], java: [], javac: [], go: [], ruby: [], dotnet: [],
-};
-
-function isReadOnlySubcommand(sub) {
-  const s = String(sub || '').trim();
-  if (!s) return true;
-  if (/>/.test(s)) return false;                                        // 重定向 = 会写文件
-  // -delete / -exec 这类会动文件；-o / --output 会写输出文件（sort -o out.txt）
-  if (/\s(?:-delete|-exec|-execdir|--delete|--remove)\b/.test(s)) return false;
-  if (/(?:^|\s)(?:-o|--output)\b/.test(s)) return false;
-  const tokens = s.split(/\s+/);
-  let i = 0;
-  while (i < tokens.length && (/^[A-Za-z_][A-Za-z0-9_]*=/.test(tokens[i])
-    || /^(?:sudo|env|time|nohup|command|builtin)$/.test(tokens[i]))) i++;
-  if (i >= tokens.length) return false;
-  const cmd = tokens[i].replace(/^["']|["']$/g, '').toLowerCase().replace(/\.(?:exe|cmd|bat)$/, '');
-  const rest = tokens.slice(i + 1).filter((t) => !/^--?(?:no)?color(?:=.+)?$/i.test(t));
-  if (!Object.prototype.hasOwnProperty.call(READONLY_CMDS, cmd)) return false;
-  const spec = READONLY_CMDS[cmd];
-  if (spec === true) return true;
-  const sub2 = String(rest[0] || '').replace(/^["']|["']$/g, '').toLowerCase();
-  if (spec.includes(sub2)) return true;
-  // 只带版本/帮助参数也算只读：node -v / python --version
-  return rest.length > 0 && rest.every((t) => /^--?(?:v|version|h|help|V)$/.test(t));
-}
-
-function isReadOnlyCommand(cmd) {
-  const parts = splitCommands(cmd);
-  return parts.length > 0 && parts.every(isReadOnlySubcommand);
-}
-
-// VS Code 的规则键：普通命令名（按前缀匹配，`git` 命中 `git status`）或 /正则/。
-// 值可以是 true / false，也可以是 { approve: true, matchCommandLine: true }。
-function commandRuleVerdict(rule) {
-  if (rule === true) return true;
-  if (rule === false) return false;
-  if (rule && typeof rule === 'object' && typeof rule.approve === 'boolean') return rule.approve;
-  return null;
-}
-function matchCommandRule(pattern, sub) {
-  const p = String(pattern == null ? '' : pattern).trim();
-  if (!p) return false;
-  const m = /^\/(.*)\/([a-z]*)$/i.exec(p);
-  try {
-    if (m) return new RegExp(m[1], m[2] || 'i').test(sub);
-  } catch (e) { return false; }
-  const s = String(sub || '').trim().toLowerCase();
-  const lower = p.toLowerCase();
-  return s === lower || s.startsWith(lower + ' ');
-}
-
-// ---- VS Code 判定 ----
-function vscodeHostDecision(tool, toolInput, values) {
-  const v = values || {};
-  if (v['chat.tools.global.autoApprove'] === true) {
-    return { state: 'auto', why: 'chat.tools.global.autoApprove=true（宿主全局自动批准）' };
-  }
-  const defMode = String(v['chat.permissions.default'] || '').toLowerCase();
-  if (defMode === 'autoapprove' || defMode === 'autopilot') {
-    return { state: 'auto', why: `chat.permissions.default=${defMode}（宿主默认权限级别）` };
-  }
-
-  const name = normalizeToolName(tool);
-  const eligible = v['chat.tools.eligibleForAutoApproval'];
-  if (eligible && typeof eligible === 'object') {
-    for (const k of Object.keys(eligible)) {
-      if (normalizeToolName(k) === name && eligible[k] === false) {
-        return { state: 'ask', why: `chat.tools.eligibleForAutoApproval["${k}"]=false（宿主强制手动）` };
-      }
-    }
-  }
-
-  if (!TERMINAL_TOOL_SET.has(name)) {
-    return { state: 'unknown', why: '非终端类工具，宿主没有可读的自动批准规则' };
-  }
-  const cmd = commandOf(toolInput);
-  if (!cmd) return { state: 'unknown', why: '拿不到命令内容' };
-  if (v['chat.tools.terminal.enableAutoApprove'] === false) {
-    return { state: 'ask', why: 'chat.tools.terminal.enableAutoApprove=false（宿主关掉了终端自动批准）' };
-  }
-
-  const rules = v['chat.tools.terminal.autoApprove'];
-  const parts = splitCommands(cmd);
-  if (rules && typeof rules === 'object' && !Array.isArray(rules)) {
-    const keys = Object.keys(rules);
-    const denied = keys.filter((k) => commandRuleVerdict(rules[k]) === false
-      && parts.some((p) => matchCommandRule(k, p)));
-    if (denied.length) {
-      return { state: 'ask', why: `命中宿主 false 规则：${denied.join('、')}` };
-    }
-    const everyTrue = parts.length > 0 && parts.every((p) => keys
-      .some((k) => commandRuleVerdict(rules[k]) === true && matchCommandRule(k, p)));
-    if (everyTrue) {
-      return { state: 'auto', why: '命令全部命中宿主自动批准规则' };
-    }
-  }
-  if (isReadOnlyCommand(cmd)) {
-    return { state: 'auto', why: '只读命令（宿主内置规则会直接放行）' };
-  }
-  return { state: 'unknown', why: '宿主规则未命中，按默认高风险名单保守拦' };
-}
-
-// ---- Trae 判定 ----
-function toCommandList(raw) {
-  if (Array.isArray(raw)) return raw.map((s) => String(s).trim()).filter(Boolean);
-  if (typeof raw !== 'string') return [];
-  const t = raw.trim();
-  if (!t) return [];
-  try {
-    const parsed = JSON.parse(t);
-    if (Array.isArray(parsed)) return parsed.map((s) => String(s).trim()).filter(Boolean);
-  } catch (e) { /* 不是 JSON，按行/逗号拆 */ }
-  return t.split(/[\r\n,]/).map((s) => s.trim()).filter(Boolean);
-}
-function commandPrefixHit(prefix, cmd) {
-  const p = String(prefix || '').trim().toLowerCase();
-  const c = String(cmd || '').trim().toLowerCase();
-  if (!p || !c) return false;
-  if (p.endsWith('*')) return c.startsWith(p.slice(0, -1));
-  return c === p || c.startsWith(p + ' ');
-}
-
-function traeHostDecision(tool, toolInput, values) {
-  const v = values || {};
-  const name = normalizeToolName(tool);
-
-  // MCP 工具：AI.toolcall.v2.{ide,solo}.mcp.autoRun（alwaysAsk = 仍然每次问）
-  if (/^mcp/.test(name)) {
-    const mcp = v['AI.toolcall.v2.ide.mcp.autoRun'] || v['AI.toolcall.v2.solo.mcp.autoRun'];
-    if (mcp && String(mcp).toLowerCase() !== 'alwaysask') {
-      return { state: 'auto', why: `AI.toolcall.v2.*.mcp.autoRun=${mcp}（宿主自动运行 MCP 工具）` };
-    }
-    return { state: 'unknown', why: '宿主未开启 MCP 自动运行' };
-  }
-
-  if (!TERMINAL_TOOL_SET.has(name)) {
-    return { state: 'unknown', why: '非终端类工具，宿主没有可读的自动批准规则' };
-  }
-  const cmd = commandOf(toolInput);
-  if (!cmd) return { state: 'unknown', why: '拿不到命令内容' };
-
-  // 键名以本机 Trae 应用包为准（AI.toolcall.v2.*），网上流传的那套已过时
-  const mode = String(
-    v['AI.toolcall.v2.ide.command.mode']
-    || v['AI.toolcall.v2.solo.command.mode']
-    || v['AI.toolcall.v2.command.mode']
-    || ''
-  ).toLowerCase();
-  const allow = toCommandList(v['AI.toolcall.v2.ide.command.allowList']
-    ?? v['AI.toolcall.v2.command.allowList']);
-  const deny = toCommandList(v['AI.toolcall.v2.ide.command.denyList']
-    ?? v['AI.toolcall.v2.command.denyList']);
-
-  if (!mode) return { state: 'unknown', why: '读不到 AI.toolcall.v2.*.command.mode' };
-  if (mode === 'alwaysask') return { state: 'ask', why: '命令运行方式 = 手动运行（alwaysAsk）' };
-  if (mode === 'alwaysrun') return { state: 'auto', why: '命令运行方式 = 自动运行（alwaysRun）' };
-  if (mode === 'blacklist') {
-    const hit = deny.find((p) => commandPrefixHit(p, cmd));
-    if (hit) return { state: 'ask', why: `命中宿主黑名单：${hit}` };
-    return { state: 'auto', why: '命令运行方式 = 黑名单（未命中黑名单即自动运行）' };
-  }
-  if (mode === 'whitelist') {
-    // 当前 Trae 里这一项叫「沙箱运行（支持白名单）」：命令在安全沙箱中自动执行，
-    // 白名单命令绕过沙箱直接执行 —— 两条路都是自动执行，所以整体不拦。
-    const hit = allow.find((p) => commandPrefixHit(p, cmd));
-    if (hit) return { state: 'auto', why: `命中宿主白名单：${hit}` };
-    return { state: 'auto', why: '命令运行方式 = 沙箱运行（支持白名单），命令由宿主自动执行' };
-  }
-  return { state: 'unknown', why: `未知的命令运行方式：${mode}` };
-}
-
-// 只有 vscode / trae 需要跟随（其它宿主有独立的权限事件，不在 PreToolUse 上审批）
-function hostAutoPlan(source, tool, toolInput, cwd) {
-  const src = String(source || '');
-  if (src !== 'vscode' && src !== 'trae') return null;
-  if (flag('POMODORO_RESPECT_HOST_AUTO', true) === false) return null;
-  const hs = hostSettings(src, cwd);
-  const d = src === 'vscode'
-    ? vscodeHostDecision(tool, toolInput, hs.values)
-    : traeHostDecision(tool, toolInput, hs.values);
-  return { ...d, files: hs.files };
-}
-
-// 返回 { intercept, why, host } —— intercept=false 时**不输出任何决策**，
-// 让宿主按它自己的审批设置走
-function pretoolPlan(payload, source) {
-  // 这条必须排在最前（连 POMODORO_CONFIRM_PRETOOL 也拦不住）：Codex 的 PreToolUse
-  // 只认 deny，在这里弹窗拿到的「允许」根本传不回去，只会造成重复弹窗。
-  if (PERMISSION_EVENT_ONLY_SOURCES.has(String(source || ''))) {
-    return { intercept: false, why: 'Codex 的审批走 PermissionRequest（PreToolUse 的 allow/ask 不生效）' };
-  }
-  if (flag('POMODORO_CONFIRM_PRETOOL', false) === true) {
-    return { intercept: true, why: 'POMODORO_CONFIRM_PRETOOL=1（全量开启）' };
-  }
-  if (!PRETOOL_APPROVAL_SOURCES.has(String(source || ''))) {
-    return { intercept: false, why: '该宿主有独立权限事件，不走 PreToolUse 审批' };
-  }
-  const raw = String(payload.tool_name || payload.tool || '');
-  const name = normalizeToolName(raw);
-
-  // 用户显式指定了拦截名单：完全按名单走，不再跟随宿主（要的就是「我说了算」）
-  const explicit = env.POMODORO_PRETOOL_APPROVE_TOOLS !== undefined
-    ? String(env.POMODORO_PRETOOL_APPROVE_TOOLS)
-    : (env.POMODORO_VSCODE_APPROVE_TOOLS !== undefined
-      ? String(env.POMODORO_VSCODE_APPROVE_TOOLS)
-      : null);
-  if (explicit !== null) {
-    if (!explicit) {
-      return { intercept: false, why: 'POMODORO_PRETOOL_APPROVE_TOOLS 为空 → 关闭 PreToolUse 审批' };
-    }
-    let hit = false;
-    try {
-      hit = new RegExp(explicit, 'i').test(name) || new RegExp(explicit, 'i').test(raw);
-    } catch (e) { hit = false; }   // 正则写错了就当不拦，别把 agent 卡死
-    return { intercept: hit, why: hit ? '命中用户自定义拦截名单' : '未命中用户自定义拦截名单' };
-  }
-
-  let inDefault = false;
-  try {
-    inDefault = new RegExp(VSCODE_APPROVE_DEFAULT, 'i').test(name)
-      || new RegExp(VSCODE_APPROVE_DEFAULT, 'i').test(raw);
-  } catch (e) { inDefault = false; }
-  if (!inDefault) return { intercept: false, why: '不在默认高风险工具名单内' };
-
-  const host = hostAutoPlan(source, raw, payload.tool_input || payload.toolInput, payload.cwd);
-  if (host && host.state === 'auto') {
-    return { intercept: false, why: `跟随宿主自动允许：${host.why}`, host };
-  }
-  return {
-    intercept: true,
-    why: host ? `宿主未自动允许：${host.why}` : '无宿主配置可读，按默认名单拦',
-    host,
-  };
-}
-
-function shouldApprovePreTool(payload, source) {
-  return pretoolPlan(payload, source).intercept;
-}
-
-// ---------------------------------------------------------------------------
-// Claude Code / ZCode（事件名一致，输出同形）
-// ---------------------------------------------------------------------------
 async function handleAsk(payload, source, gw, context) {
   const toolInput = payload.tool_input || payload.toolInput || {};
   const questions = questionsFromToolInput(toolInputQuestions(payload));
@@ -1057,14 +629,10 @@ async function handlePermission(payload, source, gw, context) {
   const tool = String(payload.tool_name || '工具');
   const toolInput = payload.tool_input || {};
   const rule = ruleContentFor(tool, toolInput);
-  const event = payload.hook_event_name;
 
-  // 宿主不认 updatedPermissions（VS Code / Cursor）时，靠本地规则实现「始终允许」
+  // 宿主不认 updatedPermissions（Cursor 等）时，靠本地规则实现「始终允许」
   if (localRuleMatch(source, tool, rule)) {
-    if (event === 'PermissionRequest') {
-      return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', message: '命中本地「始终允许」规则' } } };
-    }
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: '命中番茄钟「始终允许」规则' } };
+    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', message: '命中本地「始终允许」规则' } } };
   }
 
   const ms = timeoutMs();
@@ -1084,62 +652,31 @@ async function handlePermission(payload, source, gw, context) {
     timeoutMs: ms,
   }, ms);
 
-  if (!result) return preToolFallback(source, '番茄钟没有收到决策（应用未运行或弹窗被关掉）');
+  if (!result) return null;   // 未收到决策：不输出，交回宿主原生审批
   const decided = result.decidedBy === 'user';
 
   if (decided && result.action === 'allow') {
-    const out = { behavior: 'allow', message: result.text || '用户通过番茄钟弹窗允许' };
-    if (event === 'PermissionRequest') return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: out } };
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'allow', permissionDecisionReason: out.message } };
+    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'allow', message: result.text || '用户通过番茄钟弹窗允许' } } };
   }
 
   if (decided && result.action === 'allow-always') {
     const updatedPermissions = buildPermissionUpdates(tool, toolInput, payload.permission_suggestions);
     localRuleAdd(source, tool, rule);   // 兜底：宿主不认 updatedPermissions 时也生效
-    if (event === 'PermissionRequest') {
-      const decision = { behavior: 'allow', message: '用户选择始终允许（已记入番茄钟本地规则）' };
-      // Codex 遇到不支持的字段会 fail closed，绝不能把 updatedPermissions 塞给它
-      if (!PERMISSION_EVENT_ONLY_SOURCES.has(String(source || ''))) {
-        decision.updatedPermissions = updatedPermissions;
-      }
-      return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };
+    const decision = { behavior: 'allow', message: '用户选择始终允许（已记入番茄钟本地规则）' };
+    // Codex 遇到不支持的字段会 fail closed，绝不能把 updatedPermissions 塞给它
+    if (!PERMISSION_EVENT_ONLY_SOURCES.has(String(source || ''))) {
+      decision.updatedPermissions = updatedPermissions;
     }
-    return {
-      hookSpecificOutput: {
-        hookEventName: 'PreToolUse',
-        permissionDecision: 'allow',
-        permissionDecisionReason: '用户选择始终允许',
-        updatedPermissions,
-      },
-    };
+    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision } };
   }
 
   if (decided && result.action === 'deny') {
     const message = result.text ? `用户拒绝：${result.text}` : '用户通过番茄钟弹窗拒绝';
-    if (event === 'PermissionRequest') return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message } } };
-    return { hookSpecificOutput: { hookEventName: 'PreToolUse', permissionDecision: 'deny', permissionDecisionReason: message } };
+    return { hookSpecificOutput: { hookEventName: 'PermissionRequest', decision: { behavior: 'deny', message } } };
   }
 
   // 未决策：不输出，走宿主原生询问
-  return preToolFallback(source, '番茄钟未收到决策，请手动确认');
-}
-
-// VS Code / Trae 都没有 PermissionRequest，PreToolUse 若「不做决策」，就会按宿主
-// 自己的审批设置走 —— 用户可能已经把终端命令设成免确认，等于被静默放行。
-// 所以这里显式回一个 ask，强制弹出原生确认：宁可多问一次，也不替他放行。
-//
-// Codex 相反：它有 PermissionRequest 兜底，且 PreToolUse 的 ask 本来就不被支持
-// （不生效 ＝ 等于什么都没回）→ 对 Codex 返回 null，让它走自己的审批流程，
-// 那条流程会触发 PermissionRequest，弹窗在那里接住。
-function preToolFallback(source, reason) {
-  if (!PRETOOL_APPROVAL_SOURCES.has(String(source || ''))) return null;
-  return {
-    hookSpecificOutput: {
-      hookEventName: 'PreToolUse',
-      permissionDecision: 'ask',
-      permissionDecisionReason: reason,
-    },
-  };
+  return null;
 }
 
 async function runAncliMode(gw, payload) {
@@ -1163,19 +700,8 @@ async function runAncliMode(gw, payload) {
     return;
   }
 
-  // 普通 PreToolUse 双向确认（Claude/ZCode 默认关；VS Code / Trae 默认只拦高风险
-  // 工具，且**命中宿主自己的自动允许就直接不拦** —— 见 pretoolPlan）
-  if (event === 'PreToolUse') {
-    const plan = pretoolPlan(payload, source);
-    if (plan.intercept) {
-      const out = await handlePermission(payload, source, gw, context);
-      if (out) process.stdout.write(JSON.stringify(out));
-      return;
-    }
-    if (flag('POMODORO_DEBUG', false) === true) {
-      process.stderr.write(`[pomodoro-hook] PreToolUse 不拦（${payload.tool_name || ''}）：${plan.why}\n`);
-    }
-  }
+  // PreToolUse：2026-09-18 起只处理提问（上面 isAskTool 分支）与活动上报，
+  // 不再拦截/审批普通工具调用 —— 审批统一交给有 PermissionRequest 的宿主。
 
   // 其余事件：只上报计数/通知
   const bodyByEvent = {
@@ -1644,57 +1170,6 @@ async function runManualPermission(gw, args) {
 }
 
 // ---------------------------------------------------------------------------
-// 调试：把「跟随宿主自动允许」读到了什么、判定成什么，一次打清楚
-//   node pomodoro-hook.js host-perms [--source vscode|trae] [--tool run_in_terminal]
-//                                    [--command "ls -la"] [--cwd <项目目录>]
-// 不需要番茄钟在运行（纯读文件 + 纯判定）
-// ---------------------------------------------------------------------------
-function pickHostKeys(source, values) {
-  const keys = source === 'trae'
-    ? ['AI.toolcall.v2.ide.command.mode', 'AI.toolcall.v2.solo.command.mode',
-      'AI.toolcall.v2.command.mode', 'AI.toolcall.v2.command.allowList',
-      'AI.toolcall.v2.command.denyList', 'AI.toolcall.v2.ide.mcp.autoRun',
-      'AI.toolcall.v2.solo.mcp.autoRun']
-    : ['chat.tools.global.autoApprove', 'chat.permissions.default',
-      'chat.tools.terminal.enableAutoApprove', 'chat.tools.terminal.autoApprove',
-      'chat.tools.eligibleForAutoApproval', 'chat.tools.edits.autoApprove'];
-  const out = {};
-  for (const k of keys) if (k in values) out[k] = values[k];
-  return out;
-}
-
-function runHostPerms(args) {
-  const opts = {};
-  for (let i = 0; i < args.length - 1; i++) {
-    if (args[i].startsWith('--')) opts[args[i].slice(2)] = args[i + 1];
-  }
-  // main() 会先把 `--source x` 摘掉并写进 POMODORO_SOURCE，这里要兜底读一次
-  const source = String(opts.source || env.POMODORO_SOURCE || 'vscode');
-  const tool = opts.tool || (source === 'trae' ? 'RunCommand' : 'run_in_terminal');
-  const toolInput = { command: opts.command || '' };
-  const cwd = opts.cwd || '';
-  const hs = hostSettings(source, cwd);
-  const decision = source === 'trae'
-    ? traeHostDecision(tool, toolInput, hs.values)
-    : vscodeHostDecision(tool, toolInput, hs.values);
-  const plan = pretoolPlan({ tool_name: tool, tool_input: toolInput, cwd }, source);
-  process.stdout.write(JSON.stringify({
-    source,
-    tool,
-    command: toolInput.command,
-    respectHostAuto: flag('POMODORO_RESPECT_HOST_AUTO', true) !== false,
-    interceptOverride: env.POMODORO_PRETOOL_APPROVE_TOOLS !== undefined
-      ? env.POMODORO_PRETOOL_APPROVE_TOOLS
-      : (env.POMODORO_VSCODE_APPROVE_TOOLS !== undefined ? env.POMODORO_VSCODE_APPROVE_TOOLS : null),
-    settingsFiles: hs.files,
-    hostSettings: pickHostKeys(source, hs.values),
-    hostDecision: decision,
-    intercept: plan.intercept,
-    reason: plan.why,
-  }, null, 2) + '\n');
-}
-
-// ---------------------------------------------------------------------------
 // install：把 hook 写进各宿主配置（先备份）
 // ---------------------------------------------------------------------------
 function ownPath() {
@@ -1797,9 +1272,8 @@ function installVscode(print) {
     const list = cfg.hooks[evt] || (cfg.hooks[evt] = []);
     if (!list.some((e) => /pomodoro-hook\.js/.test(String(e.command || '')))) list.push(entry(extra));
   };
-  // 提问与审批都靠 PreToolUse（VS Code 没有 PermissionRequest）；
-  // VS Code 会忽略 matcher，所以「只拦高风险工具」的判断写在 CLI 里
-  // PreToolUse 要等用户点弹窗 → 超时必须放大（VS Code 默认 30 秒，会直接掐掉）
+  // 提问靠 PreToolUse（VS Code 没有 PermissionRequest）；2026-09-18 起不再做工具审批
+  // 提问要等用户点弹窗 → 超时必须放大（VS Code 默认 30 秒，会直接掐掉）
   add('PreToolUse', { timeout: HOST_WAIT_SEC });
   add('PostToolUse', { timeout: 30 });
   add('SessionStart', { timeout: 30 });
@@ -1819,14 +1293,12 @@ function installVscode(print) {
 }
 
 // Trae（字节）：6 个事件 SessionStart / UserPromptSubmit / PreToolUse / PostToolUse /
-// Stop / Notification —— **有 Notification，但没有 PermissionRequest**，
-// 所以审批同样挂 PreToolUse（返回 permissionDecision 的 allow/deny/ask 都被支持）。
+// Stop / Notification —— **有 Notification，但没有 PermissionRequest**。
+// 2026-09-18 起 PreToolUse 不再做工具审批，只处理提问（AskUserQuestion）→
+// matcher 也收窄到提问工具，活动上报交给 PostToolUse。
 // 配置是 Claude Code 那种嵌套结构（event → [{matcher, hooks:[{type,command,timeout}]}]），
 // 全局放 %userprofile%/.trae-cn/hooks.json，项目级放 $PROJECT/.trae/hooks.json。
-// 与 VS Code 不同的是：**Trae 的 matcher 真的生效**（限 PreToolUse/PostToolUse/Notification），
-// 所以这里用 matcher 先把普通工具挡在外面，脚本里的高风险判断作为兜底。
-const TRAE_PRETOOL_MATCHER =
-  'RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile';
+const TRAE_PRETOOL_MATCHER = 'AskUserQuestion';
 
 function installTrae(print) {
   const file = path.join(os.homedir(), '.trae-cn', 'hooks.json');
@@ -2099,9 +1571,6 @@ function usage() {
     '  pomodoro-hook.js notify --title T --message M [--sub S] [--type agent]',
     '  pomodoro-hook.js status',
     '  pomodoro-hook.js sessions               # 查看 hook 跟踪到的会话（任务/最近工具/项目）',
-    '  pomodoro-hook.js host-perms [--source vscode|trae] [--tool run_in_terminal]',
-    '                             [--command "ls -la"] [--cwd <项目目录>]',
-    '                                          # 看「跟随宿主自动允许」读到了什么、判定成什么',
     '  pomodoro-hook.js install --agent <宿主> [--print] [--clean] [--with-notify]',
     '',
     '  宿主：zcode / claude / vscode / trae / cursor / opencode / codex / qwen / all',
@@ -2124,8 +1593,6 @@ async function main() {
   // 这两个不需要网关在线
   if (args[0] === '--help' || args[0] === '-h' || args[0] === 'help') { usage(); return; }
   if (args[0] === 'install') { runInstall(args.slice(1)); return; }
-  // 只读宿主配置做判定，不需要网关在线
-  if (args[0] === 'host-perms') { runHostPerms(args.slice(1)); return; }
 
   const gw = findGateway();
   if (!gw) {
