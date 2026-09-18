@@ -69,6 +69,11 @@ const PomodoroApp = (() => {
     installClean: $('installClean'),
     installResult: $('installResult'),
     agentActivity: $('agentActivity'),
+    aboutVersion: $('aboutVersion'),
+    aboutMeta: $('aboutMeta'),
+    btnCheckUpdate: $('btnCheckUpdate'),
+    btnOpenRepo: $('btnOpenRepo'),
+    updateResult: $('updateResult'),
   };
 
   const RING_CIRCUM = 615.75; // 2π·98
@@ -611,6 +616,75 @@ const PomodoroApp = (() => {
     }
   }
 
+  // ---- 关于 / 检查更新 ----
+  function setUpdateResult(nodes) {
+    const box = dom.updateResult;
+    if (!box) return;
+    box.innerHTML = '';
+    if (!nodes || !nodes.length) { box.hidden = true; return; }
+    nodes.forEach((n) => box.appendChild(n));
+    box.hidden = false;
+  }
+
+  function renderUpdateResult(res) {
+    if (!res || !res.ok) {
+      setUpdateResult([
+        el('div', 'update-head fail', '✗ 检查失败'),
+        el('div', 'update-body', (res && res.error) || '未知错误'),
+        el('div', 'install-hint', '应用只在点「检查更新」时联网一次；失败通常是网络不通或 GitHub 接口限流。'),
+      ]);
+      return;
+    }
+    if (!res.hasUpdate) {
+      setUpdateResult([
+        el('div', 'update-head latest', '✓ 已是最新版本'),
+        el('div', 'update-body', `当前 v${res.currentVersion} · 线上 v${res.latestVersion}`),
+      ]);
+      return;
+    }
+    const nodes = [
+      el('div', 'update-head new', `↑ 有新版本 v${res.latestVersion}`),
+      el('div', 'update-body',
+        `当前 v${res.currentVersion}${res.publishedAt ? ` · 发布于 ${String(res.publishedAt).slice(0, 10)}` : ''}`),
+    ];
+    if (res.notes) nodes.push(el('div', 'update-notes', res.notes));
+    const go = el('button', 'copy-btn small', '前往下载');
+    go.addEventListener('click', () => window.pomodoro.openExternal(res.releaseUrl));
+    nodes.push(go);
+    setUpdateResult(nodes);
+  }
+
+  // 手动检查更新：唯一的联网入口，点了才发一次请求
+  async function checkUpdate() {
+    if (!dom.btnCheckUpdate || dom.btnCheckUpdate.disabled) return;
+    const label = dom.btnCheckUpdate.textContent;
+    dom.btnCheckUpdate.disabled = true;
+    dom.btnCheckUpdate.textContent = '检查中…';
+    setUpdateResult([el('div', 'update-body', '正在向 GitHub 查询最新版本…')]);
+    try {
+      renderUpdateResult(await window.pomodoro.checkUpdate());
+    } catch (e) {
+      renderUpdateResult({ ok: false, error: (e && e.message) || String(e) });
+    } finally {
+      dom.btnCheckUpdate.disabled = false;
+      dom.btnCheckUpdate.textContent = label;
+    }
+  }
+
+  // 版本号只在首次打开抽屉时取一次，之后不再打扰主进程
+  async function loadAbout() {
+    if (!dom.aboutVersion || dom.aboutVersion.textContent !== '—') return;
+    try {
+      const info = await window.pomodoro.getAppInfo();
+      dom.aboutVersion.textContent = `v${info.version}`;
+      dom.aboutMeta.textContent = `Electron ${info.electron} · Node ${info.node} · ${info.platform} · ${info.license}`;
+      if (dom.btnOpenRepo) dom.btnOpenRepo.dataset.url = info.repoUrl;
+    } catch (e) {
+      dom.aboutVersion.textContent = '未知';
+      dom.aboutMeta.textContent = '版本信息读取失败';
+    }
+  }
+
   // ---- Agent 网关状态 → UI（标题栏按钮 + 设置抽屉开关，两处同一份状态）----
   function applyGatewayUI() {
     const on = !!gatewayState.enabled;
@@ -858,6 +932,14 @@ const PomodoroApp = (() => {
     });
     window.pomodoro.requestGatewayState();
 
+    // 关于：版本号在第一次打开抽屉时取；检查更新是应用唯一的联网入口（手动触发）
+    if (dom.btnCheckUpdate) dom.btnCheckUpdate.addEventListener('click', checkUpdate);
+    if (dom.btnOpenRepo) {
+      dom.btnOpenRepo.addEventListener('click', () => {
+        window.pomodoro.openExternal(dom.btnOpenRepo.dataset.url || 'https://github.com/HonorVanEr/pomodoro-fluent');
+      });
+    }
+
     // 快捷键：空格 开始/暂停，R 重置（输入框聚焦或按键重复时不触发）
     window.addEventListener('keydown', (e) => {
       if (e.repeat) return;
@@ -881,6 +963,7 @@ const PomodoroApp = (() => {
     dom.sRounds.value = state.rounds;
     dom.sAuto.checked = state.autoNext;
     dom.settingsDrawer.classList.add('open');
+    loadAbout();
   }
   function closeSettings() {
     dom.settingsDrawer.classList.remove('open');

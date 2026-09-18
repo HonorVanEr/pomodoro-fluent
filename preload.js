@@ -35,6 +35,11 @@ contextBridge.exposeInMainWorld('pomodoro', {
   // 一键安装 hook：主进程直接跑 CLI 写配置，返回 { ok, message, files, command, log }
   installHook: (agent, clean) => ipcRenderer.invoke('hook:install', { agent, clean }),
 
+  // 关于 / 检查更新（请求由主进程代发：渲染层有 CSP，直接取不到 GitHub）
+  getAppInfo: () => ipcRenderer.invoke('app:info'),
+  checkUpdate: () => ipcRenderer.invoke('app:check-update'),
+  openExternal: (url) => ipcRenderer.send('app:open-external', url),
+
   // 托盘状态同步
   updateTray: (state) => ipcRenderer.send('tray:update', state),
 
