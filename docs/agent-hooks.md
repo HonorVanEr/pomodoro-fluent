@@ -3,12 +3,16 @@
 番茄钟运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址）。
 agent 要提问、要权限、或只是通知你一声时，番茄钟弹出 Fluent 风格桌面弹窗——**提问和权限可以直接在弹窗里作答**，不用来回切终端。
 
+> 本文对应当前版本 **v1.1.6**。核心行为：**提问与权限都在弹窗里处理，`PreToolUse` 一概不做工具审批**
+> （审批只走 `PermissionRequest`；没有该事件的宿主交给宿主自己）——详见下面的宿主支持表。
+
 ```
 ZCode hook ────────────┐                                    ┌─ 提问弹窗（选项/多选/自定义回答）
 Claude Code hook ──────┤                                    ├─ 权限弹窗（允许 / 始终允许 / 拒绝）
 VS Code Copilot hook ──┼─HTTP→ 127.0.0.1:5277 网关 ─→ 弹窗 ─┤   （含上下文：任务 / 子 agent / 工具）
 Trae hook ─────────────┤      (token 鉴权)      ↖ 长轮询   ├─ 通知弹窗（看完即走）
 Cursor hook ───────────┤                        用户决策    └─ 专注期活动计数 / 远程控制
+Qwen Code hook ────────┤
 OpenCode 插件 ─────────┤
 Codex hooks ───────────┘
 ```
@@ -19,12 +23,18 @@ Codex hooks ───────────┘
 |---|---|---|---|---|
 | ZCode | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.zcode/cli/config.json` |
 | Claude Code | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.claude/settings.json` |
-| VS Code Copilot | ✅ `vscode/askQuestions` | ⚠️ 挂在 `PreToolUse`（VS Code 无 `PermissionRequest`；只处理提问，不做工具审批） | ✅ `Stop` | `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json` |
-| Trae | ✅ `AskUserQuestion` | ⚠️ 挂在 `PreToolUse`（无 `PermissionRequest`；只处理提问，matcher 收窄到提问工具） | ✅ `Notification` / `Stop` | `%userprofile%/.trae-cn/hooks.json` 或 `.trae/hooks.json` |
+| VS Code Copilot | ✅ `vscode/askQuestions` | ❌ **无权限事件** → 交回 VS Code 自己的审批设置 | ✅ `Stop` | `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json` |
+| Trae | ✅ `AskUserQuestion` | ❌ **无权限事件** → 交回 Trae 自己的审批设置 | ✅ `Notification` / `Stop` | `%userprofile%/.trae-cn/hooks.json` 或 `.trae/hooks.json` |
 | Cursor | ✅ `preToolUse` + `updated_input` | ✅ `beforeShellExecution` / `preToolUse` / `beforeMCPExecution` | ✅ | `~/.cursor/hooks.json` 或 `.cursor/hooks.json` |
 | OpenCode | ✅ `question.asked` | ✅ `permission.ask` | ✅ | 插件 + `opencode.json` |
 | Codex CLI | ❌ 无提问回调 | ✅ `PermissionRequest`（Codex 的独立权限事件，**只在它本来就要问时触发**） | ✅ 12 个事件 | `~/.codex/hooks.json` 或 `~/.codex/config.toml` 的内联 `[hooks]` |
 | Qwen Code | ✅ `AskUserQuestion` | ✅ `PermissionRequest` | ✅ | `~/.qwen/settings.json` |
+
+> **`PreToolUse` 不做工具审批（2026-09-18 起）**：所有宿主的 `PreToolUse` 只用来接管**提问**
+> （`AskUserQuestion` / `askQuestions` / `askQuestion`）和上报活动（`tool-before`），普通工具调用
+> 一律静默、不回决策。审批统一走 `PermissionRequest`；**VS Code / Trae 没有这个事件**，所以它们的
+> 命令执行、删改文件等操作**完全按宿主自己的审批设置走**，番茄钟不介入。
+> 想调这两家的放行策略，请改宿主自己的设置（VS Code 的 `chat.tools.*`、Trae 的 `AI.toolcall.v2.*`）。
 
 > 任何「Claude Code 兼容格式」的宿主（iFlow、Trae、CodeBuddy、Copilot CLI 等）都能直接用，把 `pomodoro-hook.js` 当成 hook command 填进去即可。
 
@@ -33,7 +43,7 @@ Codex hooks ───────────┘
 | kind | 触发场景 | 弹窗里能做什么 | 返回给 agent |
 |---|---|---|---|
 | `ask` | `AskUserQuestion` / OpenCode `question.asked` | 选选项（单选即时提交、多选确认后提交）、填自定义回答、`Enter` 提交 `Esc` 取消 | `answers` |
-| `permission` | `PermissionRequest` / OpenCode `permission.ask` | 允许一次 / 始终允许 / 拒绝，可填备注（会作为拒绝理由回传） | `allow` / `allow-always` / `deny` |
+| `permission` | `PermissionRequest`（Claude / ZCode / Qwen / Codex）/ Cursor 的 `beforeShellExecution`·`beforeMCPExecution`·`preToolUse` / OpenCode `permission.ask` | 允许一次 / 始终允许 / 拒绝，可填备注（会作为拒绝理由回传） | `allow` / `allow-always` / `deny` |
 | `notification` | `Notification`、`session.error` 等 | 只展示，几秒后自动消失 | — |
 
 **兜底策略（重要）**：
@@ -93,7 +103,7 @@ Codex hooks ───────────┘
 
 | 弹窗上显示 | 来源 | 示例 |
 |---|---|---|
-| 来源徽标 | `--source` / 自动识别 | `ZCode` / `Claude Code` / `OpenCode` |
+| 来源徽标 | `--source` / 自动识别 | `ZCode` / `Claude Code` / `VS Code Copilot` / `Trae` / `Cursor` / `Codex` / `Qwen Code` / `OpenCode` |
 | 子 agent 徽标 | `agent_type`（Claude Code）/ `agent`（OpenCode）/ `SessionStart` 的 agent 信息 | `implementation-agent` |
 | 任务行（最多两行） | `UserPromptSubmit` 的 `prompt` | 把 agent 网关的弹窗改成可交互的 |
 | 工具 | 当前请求的 `tool_name`；通知类事件退化用「最近一次工具」 | `Bash` |
@@ -136,6 +146,10 @@ hook 侧的上报会静默跳过（不会阻断 agent 工作）；想恢复弹�
 %APPDATA%\番茄钟\hook\pomodoro-hook.js
 %APPDATA%\番茄钟\hook\opencode\pomodoro-opencode.ts
 ```
+
+> 路径跟的是应用的 userData（打包版是 `%APPDATA%\番茄钟`）；找不到时会回退读
+> `%APPDATA%\pomodoro-fluent\`（开发版/旧目录名）。`gateway.json` 同理，两处都会找。
+> 实际用的是哪一份，看安装面板给出的路径最准。
 
 ## 一键接入（推荐）
 
@@ -199,11 +213,17 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
       ],
       "PostToolUse": [
         { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode" }] }
+      ],
+      "PostToolUseFailure": [
+        { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode" }] }
       ]
     }
   }
 }
 ```
+
+- `PreToolUse` 的 matcher 只收 `AskUserQuestion` —— 2026-09-18 起不做工具审批，普通工具调用靠
+  `PostToolUse` / `PostToolUseFailure` 上报活动，不弹窗、不回决策。
 
 - ZCode 的 `AskUserQuestion` 会**同时触发 `PreToolUse` 和 `PermissionRequest`**（两个独立进程）。hook 用 `%TEMP%` 下的短期缓存（按 `tool_use_id`，90 秒）去重，**同一个问题只弹一次窗**，两个事件复用同一次决策。
 - 答案通过 `updatedInput.answers` 注入，原生提问 UI 不再出现：
@@ -228,12 +248,19 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
   "hooks": {
     "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
     "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
-    "PreToolUse": [{ "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
+    "PreToolUse": [{ "matcher": "AskUserQuestion|askQuestions|askQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
     "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
     "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }]
   }
 }
 ```
+
+- `PreToolUse` 的 matcher 只匹配提问工具（带 `timeout: 4200`，因为它要等你点弹窗）；
+  普通工具调用不弹窗、不回决策，活动上报走 `PostToolUse`（2026-09-18 起不做工具审批）。
+- `UserPromptSubmit` 是唯一携带「用户这次让 agent 干什么」的事件，弹窗的**任务行**就来自它
+  （`payload.prompt`）—— 漏装这一条，任务名永远是空的。
 
 权限决策输出（Claude Code 的 `PermissionRequest` 用 `decision` 对象）：
 
@@ -260,8 +287,10 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
   如果 `~/.copilot/hooks` 没被加载，在设置里加一条 `"~/.copilot/hooks": true`。
 - 事件集只有 8 个：`SessionStart` / `UserPromptSubmit` / `PreToolUse` / `PostToolUse` /
   `PreCompact` / `SubagentStart` / `SubagentStop` / `Stop`。
-  ⚠️ **没有 `PermissionRequest`，也没有 `Notification`** —— 提问只能挂 `PreToolUse`
-  （2026-09-18 起不再做工具审批），"任务完成通知"只能挂 `Stop`。
+  ⚠️ **没有 `PermissionRequest`，也没有 `Notification`** —— 提问只能挂 `PreToolUse`，
+  "任务完成通知"只能挂 `Stop`。
+  ⚠️ 也正因为没有权限事件，**番茄钟不做任何工具审批**：VS Code 里的命令执行、删改文件
+  完全按 VS Code 自己的审批设置走（`chat.tools.*` / `chat.permissions.default`）。
 - ⚠️ **VS Code 会忽略 matcher**（官方原话："Currently, VS Code ignores matcher values"），
   所有 hook 在每次工具调用时都会跑。PreToolUse 里非提问工具的调用只会静默上报活动，
   不会弹审批窗。
@@ -283,21 +312,19 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 **`deny` + 把答案写进 `permissionDecisionReason` 与 `additionalContext`**——后者才是"给模型看"的字段，
 模型据此继续。想换回注入式可以设 `POMODORO_ASK_MODE=answers`（但 VS Code 下不生效）。
 
-**「始终允许」**：VS Code 的 `PreToolUse` 输出里**没有 `updatedPermissions`**，
-规则回写不到宿主去。所以对 VS Code（以及同样不支持回写的 Trae / Cursor），
-用户点了「始终允许」会记进本地规则缓存
-（`%TEMP%\pomodoro-hook-cache\always-allow.json`，默认 30 天），
-下次同工具同命令直接放行、不再弹窗。关掉：`POMODORO_LOCAL_ALWAYS_ALLOW=0`。
+**没有「始终允许」这回事**：VS Code 走不到审批通道（没有 `PermissionRequest`，`PreToolUse`
+只处理提问），所以番茄钟的「允许 / 始终允许 / 拒绝」在这家**根本不会出现**。文件与命令的
+放行策略请直接在 VS Code 设置里配（`chat.tools.global.autoApprove`、`chat.permissions.default`、
+`chat.tools.terminal.autoApprove` 等），番茄钟一概不介入、也不会替它 auto-approve。
 
-**超时要留够**：VS Code 的 hook 默认 `timeout` 只有 **30 秒**（单位是秒），
-而我们要等你点弹窗 —— 所以 `install --agent vscode` 会把 `PreToolUse` 的
-`timeout` 显式设成 `4200`。手写配置时别漏了这个字段，否则 30 秒后宿主直接掐掉 hook，
-弹窗白弹。
+**超时要留够**：VS Code 的 hook 默认 `timeout` 只有 **30 秒**（单位是秒），而**提问**要等你点
+弹窗 —— 所以 `install --agent vscode` 会把 `PreToolUse` 的 `timeout` 显式设成 `4200`。
+手写配置时别漏了这个字段，否则 30 秒后宿主直接掐掉 hook，提问弹窗白弹（用户的选择传不回去）。
+其余只做上报的事件用默认 `30` 秒就够。
 
 **已在 Claude Code 配过的机器**：VS Code 默认也会读 `~/.claude/settings.json`，
-同一次工具调用会被跑两遍（等于两套 hooks 叠加）。你已经在
-`.claude/settings.json` 里配了 `PreToolUse` 且带 matcher —— VS Code 忽略 matcher，
-会变成每个工具都触发，所以**建议二选一**：要么只用 Claude Code 那份，要么在 VS Code 设置里关掉：
+同一次工具调用会被跑两遍（等于两套 hooks 叠加，多起一个 hook 进程）。两边都装了番茄钟时
+**建议二选一**：要么只用 Claude Code 那份，要么在 VS Code 设置里关掉：
 
 ```jsonc
 "chat.hookFilesLocations": { "~/.claude/settings.json": false }
@@ -326,22 +353,23 @@ hook 是否执行、以及 `Load Hooks` 日志里各 hook 是从哪个文件加�
 ## Trae（TraeCode，字节）
 
 Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌套结构**，所以适配很直接；
-但事件集只有 6 个，和 VS Code 一样**没有 `PermissionRequest`**：
+但事件集只有 6 个，和 VS Code 一样**没有 `PermissionRequest`** —— 因此**番茄钟不做工具审批**，
+Trae 里的命令执行、删改文件按 Trae 自己的设置走（`AI.toolcall.v2.*`）：
 
 | 事件 | 能做什么 | 我们的用法 |
 |---|---|---|
 | `SessionStart` | 注入上下文（`additionalContext`） | 记会话开始 |
 | `UserPromptSubmit` | `decision: block` 拦截 / 附上下文 | 记任务提示词 |
-| `PreToolUse` | **`permissionDecision` + `updatedInput`** | **提问走这里**（2026-09-18 起不做工具审批） |
+| `PreToolUse` | **`permissionDecision` + `updatedInput`** | **只用来接提问**（`AskUserQuestion`）；工具审批不用，交给 Trae 自己的设置 |
 | `PostToolUse` | `decision: block` 校验结果 | 工具计数 |
 | `Stop` | `decision: block` 阻止收尾（可配 `loop_limit`） | 只上报，**不阻断** |
 | `Notification` | 异步通知，**不改变流程** | 弹通知窗（含 `permission_prompt` / `idle_prompt`） |
 
 - 配置位置：全局 `%userprofile%/.trae-cn/hooks.json`（`install --agent trae` 会写这里），
   或界面里 设置 > Hooks 创建；项目级 `$PROJECT/.trae/hooks.json`。
-- `timeout` 单位是**秒**、默认 30 → `PreToolUse` 显式设 4200，否则等你点弹窗的工夫它就被掐了。
+- `timeout` 单位是**秒**、默认 30 → `PreToolUse` 显式设 4200，否则等你点提问弹窗的工夫它就被掐了。
 - **`matcher` 在 Trae 上是真生效的**（仅限 `PreToolUse` / `PostToolUse` / `Notification`）。
-  2026-09-18 起不做工具审批，PreToolUse 的 matcher 收窄到 `AskUserQuestion`（只处理提问），
+  2026-09-18 起不做工具审批，PreToolUse 的 matcher 已收窄为 `AskUserQuestion`（只处理提问），
   活动上报交给 `PostToolUse`。
 - Trae 的工具名：`Read` `Write` `Edit` `Glob` `Grep` `LS` **`RunCommand`** `WebSearch`
   `WebFetch` `AskUserQuestion` `Skill` `mcp__<server>__<tool>`。
@@ -364,7 +392,7 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
   "version": 1,
   "hooks": {
     "PreToolUse": [{
-      "matcher": "RunCommand|Bash|Shell|DeleteFile|Delete|RemoveFile|ApplyPatch|MoveFile|RenameFile",
+      "matcher": "AskUserQuestion",
       "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 4200 }]
     }],
     "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
@@ -396,6 +424,11 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 | `stop` | 回合结束 → 计数 + 可能弹「休息建议」 | `{}`（**不返回 `followup_message`**，避免把 agent 拖进循环） |
 | `sessionStart` / `sessionEnd` / `subagentStart` / `subagentStop` / `preCompact` | 会话与子 agent 计数 | 不回决策 |
 
+> **Cursor 是例外，仍然有权限弹窗。** 上面那条「`PreToolUse` 不做审批」说的是 Claude 风格的
+> PascalCase `PreToolUse` 事件；Cursor 用的是自己的 camelCase 事件，且**原生就有专门的三条
+> 审批通道**（`beforeShellExecution` / `beforeMCPExecution` / `preToolUse`），所以 Cursor 下的
+> 「允许 / 始终允许 / 拒绝」照常工作。
+
 超时或被关窗时返回 `permission: "ask"`，交回 Cursor 原生确认（Cursor 原生支持 ask，比硬拒更友好）；只有你**明确点了拒绝**才会 deny。
 
 两个细节（避免踩坑）：
@@ -403,7 +436,9 @@ Trae 的 hook 体系基本照 Claude Code 那套做的，**配置是同样的嵌
 - `preToolUse` 上的 `ask` **官方接受但不强制**——Cursor 只在 `beforeShellExecution` / `beforeMCPExecution`
   上完整兑现 `allow / deny / ask` 三态。所以 `preToolUse` 上的 `ask` 等价于「不做决策」，
   会落回 Cursor 自己的审批流程；结果仍然是**不会静默放行**，只是提示语由 Cursor 出。
-- 「始终允许」：Cursor 的 `preToolUse` 不能回写规则，所以和 VS Code 一样记进本地规则缓存；
+- 「始终允许」：Cursor 的 `preToolUse` 不能回写规则，所以改记进番茄钟本地规则缓存
+  （`%TEMP%\pomodoro-hook-cache\always-allow.json`，默认 30 天），下次同工具同命令直接放行、
+  不再弹窗。关掉：`POMODORO_LOCAL_ALWAYS_ALLOW=0`。
   另外 `POMODORO_PERMISSION=0` 关闭接管时返回 `{}`（不做决策），**不会**返回 `permission: "allow"`——
   以前那样写等于替用户强制放行，属于越权。
 
@@ -468,6 +503,9 @@ PreToolUse hook returned unsupported permissionDecision:ask
 流程走，而那条流程又会触发 `PermissionRequest` → **弹两次窗**。番茄钟对 Codex 的
 `PreToolUse` 只上报活动、绝不回决策。
 
+> 顺便说明：2026-09-18 起这条已经是**全宿主**的约定 —— 没有哪个宿主在 `PreToolUse` 上被
+> 番茄钟做审批。Codex 只是当年第一个暴露这个问题的宿主。
+
 好在 Codex 的 `PermissionRequest` **只在「Codex 本来就要问用户」时才触发**（不需要审批的
 调用不跑）—— Codex 自己已经判断过要不要问了，不需要额外配置。
 
@@ -503,7 +541,24 @@ PermissionRequest hook returned unsupported updatedInput
 
 ## Qwen Code
 
-Qwen Code 是 Claude Code 的兼容分支，hook 配置在 `~/.qwen/settings.json`，格式与 Claude Code 一致（`install --agent qwen` 直接写好）。
+Qwen Code 是 Claude Code 的兼容分支，hook 配置在 `~/.qwen/settings.json`，格式与 Claude Code 一致（`install --agent qwen` 直接写好）：
+
+```json
+{
+  "hooks": {
+    "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen", "timeout": 4200 }] }],
+    "PreToolUse": [{ "matcher": "AskUserQuestion|askQuestions|askQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen", "timeout": 4200 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }]
+  }
+}
+```
+
+与 Claude Code 完全同形：提问走 `updatedInput.answers`，审批走 `PermissionRequest` 的
+`decision.behavior`，`PreToolUse` 只用来接提问。
 
 ## OpenCode
 
@@ -565,7 +620,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 | 字段 | 说明 |
 |---|---|
 | `kind` | `ask` / `permission` / `notification` / `custom` |
-| `source` | 来源徽标：`zcode` / `claude-code` / `opencode` / `manual` |
+| `source` | 来源徽标：`zcode` / `claude-code` / `vscode` / `trae` / `cursor` / `opencode` / `codex` / `qwen` / `manual` |
 | `context` | 上下文：`{agent, agentType, agentId, session, project, task, tool, toolDetail}`，弹窗按空隐藏 |
 | `title` `message` `sub` `detail` | 标题 / 正文 / 附注 / 等宽详情（工具输入，可折叠滚动） |
 | `questions[]` | `ask` 用：`{id, question, header, multiSelect, custom, options:[{id,label,description}]}`，最多 4 题 × 6 选项 |
@@ -612,7 +667,7 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 | `POMODORO_SOURCE` | 自动 | `zcode` / `claude-code` / `opencode` / `vscode` / `cursor` / `codex` / `qwen`（install 生成的命令会自动带 `--source`） |
 | `POMODORO_ASK` | 1 | 是否接管 `AskUserQuestion` / `askQuestions` |
 | `POMODORO_PERMISSION` | 1 | 是否接管权限请求 |
-| `POMODORO_LOCAL_ALWAYS_ALLOW` | 1 | 0 关闭本地「始终允许」规则缓存（VS Code / Cursor 不支持规则回写，靠它落地） |
+| `POMODORO_LOCAL_ALWAYS_ALLOW` | 1 | 0 关闭本地「始终允许」规则缓存（Cursor / Codex 不支持规则回写，靠它落地） |
 | `POMODORO_ALWAYS_ALLOW` | 1 | 0 隐藏「始终允许」按钮 |
 | `POMODORO_PERMISSION_DEST` | projectSettings | 「始终允许」写进哪份配置 |
 | `POMODORO_TIMEOUT_S` | 3600 | 番茄钟兜底等待秒数（上限 7200）。宿主的 hook timeout 必须比它大——装了 hook 会自动写 4200s |
