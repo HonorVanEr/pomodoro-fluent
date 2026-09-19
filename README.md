@@ -14,7 +14,7 @@
 - **📌 迷你悬浮窗**：点击图钉收成 176×64 紧凑小窗，只剩时间与阶段文字；悬停时按钮从右侧浮出；置顶显示、自动撤下任务栏图标
 - **🧲 贴边隐藏**：迷你小窗拖到屏幕上/下/左/右边缘自动吸附，收起成 6px 进度细条；悬停滑出完整小窗，移开自动收回；多显示器下不串屏
 - **🖥️ 后台运行**：关闭窗口最小化到系统托盘，后台持续计时
-- **🤖 Agent 集成**：本地 Agent 网关 + hook CLI，Claude Code / OpenCode 需要确认、权限审批或任务完成时弹窗提醒，支持弹窗上直接「允许/拒绝」；统计专注期 agent 工具调用与打断次数，agent 空闲时建议休息（详见 [Agent 集成指南](docs/agent-hooks.md)）
+- **🤖 Agent 集成**：本地 Agent 网关 + hook CLI，**8 家宿主**（ZCode / Claude Code / VS Code Copilot / Trae / Cursor / OpenCode / Codex / Qwen Code）需要提问、权限审批或任务完成时弹窗提醒，支持在弹窗上直接作答/「允许·拒绝」；统计专注期 agent 工具调用与打断次数，agent 空闲时建议休息（详见 [Agent 集成指南](docs/agent-hooks.md)）
 - **🎨 智能配色**：界面配色随阶段变化（专注红 / 短休绿 / 长休蓝）
 - **🖱️ 无边框玻璃窗口**：Fluent 圆角卡片，可自由拖动
 
@@ -59,7 +59,7 @@ npm start
 | **R 键** | 快速重置（含轮次） |
 | **双击托盘图标** | 显示主窗口（迷你/贴边态会先展开完整窗口） |
 | **单击托盘图标** | 有「暂时收起」的确认时＝把它重新弹出来（没有待处理时单击不做任何事） |
-| 设置抽屉 → **复制 Hook 配置** | 一键生成 Claude Code hooks 配置片段（含本机 hook 脚本路径） |
+| 设置抽屉 → **复制配置 / 复制安装命令** | 按所选 agent 生成对应的 hook 配置片段 / 一键安装命令（含本机 hook 脚本路径）；也可直接点 **一键安装** 由应用代写 |
 
 ### 托盘菜单
 右键托盘图标可：待处理的确认（收起过确认时才会出现）/ 显示主窗口 / 开始-暂停 / 重置 / 跳到下一阶段（立即开始计时）/ 退出。
@@ -78,7 +78,7 @@ npm start
 应用运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址 + 随机 token 鉴权），让 AI 编程工具与番茄钟联动：
 
 - **提问弹窗（可直接作答）**：agent 的 `AskUserQuestion` 会弹窗列出选项，单选/多选/自定义回答都行，答案直接回传给 agent
-- **权限弹窗（可直接审批）**：「允许一次 / 始终允许 / 拒绝」，可填备注作为拒绝理由；「始终允许」会写入对应宿主的权限规则
+- **权限弹窗（可直接审批）**：「允许一次 / 始终允许 / 拒绝」，可填备注作为拒绝理由；「始终允许」写进宿主权限规则，宿主不支持规则回写时记进番茄钟本地缓存（**仅 Claude Code / ZCode / Qwen Code / Cursor / OpenCode / Codex 有这条通道**；VS Code 与 Trae 没有权限事件，按各自的审批设置走）
 - **知道是哪个任务在动**：弹窗带上下文——宿主与子 agent 名称、当前任务提示词、工具与命令、项目名、会话尾号（`pomodoro-hook.js sessions` 可查看跟踪明细）
 - **通知弹窗**：任务完成、异常等纯通知，看完即走，同样带上下文
 - **专注期活动统计**：主窗口显示 `🤖 工具 N · 打断 M`，专注结束弹窗汇总本期 agent 产出
@@ -109,7 +109,7 @@ npm start
 node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
 ```
 
-也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，提问挂 `PreToolUse`；VS Code **会忽略 matcher**，非提问工具的调用在 CLI 里静默上报）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，提问同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，用它收窄到 `AskUserQuestion`）；**Cursor** 在 `~/.cursor/hooks.json`；**Qwen Code** 在 `~/.qwen/settings.json`；OpenCode 走插件；**Codex** 在 `~/.codex/hooks.json`（12 个事件，审批走它自己的 `PermissionRequest` —— 该事件**只在 Codex 本来就要问用户时触发**）。
+也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，提问挂 `PreToolUse`；VS Code **会忽略 matcher**，非提问工具的调用在 CLI 里静默上报）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，提问同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，用它收窄到 `AskUserQuestion`）；**Cursor** 在 `~/.cursor/hooks.json`（camelCase 事件，`beforeShellExecution` / `beforeMCPExecution` / `preToolUse` 三条仍做审批）；**Qwen Code** 在 `~/.qwen/settings.json`（与 Claude Code 同形，提问 + `PermissionRequest` 都有）；OpenCode 走插件；**Codex** 在 `~/.codex/hooks.json`（12 个事件，审批走它自己的 `PermissionRequest` —— 该事件**只在 Codex 本来就要问用户时触发**）。
 
 > **Codex 有个反直觉的坑**：它的 `PreToolUse` 只强制执行 `permissionDecision:"deny"`，`"allow"` / `"ask"` 都是「被解析但不生效」。所以番茄钟**不在 Codex 的 `PreToolUse` 上弹窗**（点了「允许」也传不回去，只会被宿主的审批流程再问一次）；审批一律走 `PermissionRequest`。同理 `updatedPermissions` / `updatedInput` / `interrupt` 在 Codex 上会让整条答复 **fail closed**，「始终允许」改由番茄钟本地规则落盘实现。细节见 [`docs/agent-hooks.md`](docs/agent-hooks.md#codex-cli)。
 
@@ -155,12 +155,12 @@ npm i -D electron-builder --registry=https://registry.npmmirror.com
 # 打包为便携目录（快速验证，输出 dist/win-unpacked）
 npm run pack:dir
 
-# 打包 Windows 安装包（NSIS，输出 dist/Pomodoro-Fluent-Setup-1.0.1.exe）
+# 打包 Windows 安装包（NSIS，输出 dist/Pomodoro-Fluent-Setup-<版本>.exe）
 npm run pack
 ```
 
 打包产物位于 `dist/` 目录：
-- `Pomodoro-Fluent-Setup-1.0.1.exe` —— 安装程序（含桌面/开始菜单快捷方式，可选安装目录；纯英文产物名，GitHub Release 附件名不支持中文）
+- `Pomodoro-Fluent-Setup-<版本>.exe` —— 安装程序（含桌面/开始菜单快捷方式，可选安装目录；纯英文产物名，GitHub Release 附件名不支持中文）。版本号取自 `package.json`；已发布版本见 [Releases](https://github.com/HonorVanEr/pomodoro-fluent/releases)
 - `win-unpacked/番茄钟.exe` —— 免安装便携版（直接运行）
 
 > 打包需要联网下载 NSIS 等工具，若速度慢可设置镜像：
@@ -178,7 +178,7 @@ pomodoro-fluent/
 ├── preload.js           # 安全桥接层
 ├── gateway.js           # Agent 网关（本地 HTTP，hooks 对接）
 ├── bin/
-│   └── pomodoro-hook.js # Agent hook CLI（Claude Code / OpenCode / curl）
+│   └── pomodoro-hook.js # Agent hook CLI（零依赖，供 8 家宿主 hook + curl 调用）
 ├── package.json
 ├── apply-acrylic.ps1    # Acrylic 毛玻璃（DWM API，PowerShell）
 ├── assets/              # 图标资源（自动生成）
