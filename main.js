@@ -1117,7 +1117,22 @@ ipcMain.on('clipboard:write', (_e, text) => {
 // ---------------------------------------------------------------------------
 const REPO = { owner: 'HonorVanEr', name: 'pomodoro-fluent' };
 const REPO_URL = `https://github.com/${REPO.owner}/${REPO.name}`;
-const UPDATE_API = `https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases/latest`;
+// 同一个仓库里现在有两条发布线：Electron 线（tag 形如 v1.1.7）与 Rust 线
+// （tag 形如 rust-v2.0.0）。两边版本号各自独立演进（Electron 1.x / Rust 2.x），
+// 所以 **不能用 /releases/latest** —— latest 端点会把另一条线的版本当成「新版本」
+// 推给用户，点进去下到的是另一种实现的安装包。改成拉列表后按 tag 前缀挑自己那条线。
+const UPDATE_API = `https://api.github.com/repos/${REPO.owner}/${REPO.name}/releases?per_page=30`;
+const RUST_TAG_RE = /^rust[-_]/i;
+
+// 本进程是 Electron 版：只认不带 rust- 前缀的 tag（历史 tag 都没前缀，天然归这条线）
+function isOwnLineTag(tag) {
+  return !RUST_TAG_RE.test(String(tag || ''));
+}
+
+// v1.1.7 / rust-v2.0.0 / 1.1.7 → 1.1.7
+function tagToVersion(tag) {
+  return String(tag || '').replace(/^[A-Za-z]+[-_]/, '').replace(/^v/i, '');
+}
 
 // 只取前导数字段：v1.1.3 → [1,1,3]；遇到非数字段就停，
 // 所以 1.1.3-beta 也是 [1,1,3]（预发布尾缀不参与比较），不会被拆出第 4 段 0
@@ -1141,7 +1156,8 @@ function compareVersion(a, b) {
   return 0;
 }
 
-function fetchLatestRelease() {
+// 拉最近 30 个 release（含 assets 元数据），由调用方按版本线自己挑。
+function fetchReleases() {
   return new Promise((resolve, reject) => {
     const req = https.get(
       UPDATE_API,
@@ -1179,17 +1195,24 @@ ipcMain.handle('app:info', () => ({
 ipcMain.handle('app:check-update', async () => {
   const current = app.getVersion();
   try {
-    const data = await fetchLatestRelease();
-    const latest = String((data && data.tag_name) || '').replace(/^v/i, '');
-    if (!latest) return { ok: false, error: '没读到 release 版本号' };
+    const list = await fetchReleases();
+    if (!Array.isArray(list)) return { ok: false, error: 'GitHub 返回的不是 release 列表' };
+    // 只在自己的版本线里挑，按版本号取最大的那个
+    const mine = list
+      .filter((r) => r && !r.draft && !r.prerelease && isOwnLineTag(r.tag_name))
+      .map((r) => ({ rel: r, ver: tagToVersion(r.tag_name) }))
+      .filter((x) => /^\d/.test(x.ver))
+      .sort((a, b) => compareVersion(b.ver, a.ver));
+    if (!mine.length) return { ok: false, error: '没有找到本版本线的 release' };
+    const best = mine[0];
     return {
       ok: true,
       currentVersion: current,
-      latestVersion: latest,
-      hasUpdate: compareVersion(current, latest) < 0,
-      releaseUrl: (data && data.html_url) || `${REPO_URL}/releases/latest`,
-      publishedAt: (data && data.published_at) || '',
-      notes: String((data && data.body) || '').trim().slice(0, 800),
+      latestVersion: best.ver,
+      hasUpdate: compareVersion(current, best.ver) < 0,
+      releaseUrl: best.rel.html_url || `${REPO_URL}/releases`,
+      publishedAt: best.rel.published_at || '',
+      notes: String(best.rel.body || '').trim().slice(0, 800),
     };
   } catch (e) {
     return { ok: false, error: (e && e.message) || '网络请求失败' };
