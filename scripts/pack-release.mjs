@@ -81,11 +81,20 @@ const readJson = (absPath) => JSON.parse(readFileSync(absPath, 'utf8'));
 const toPosix = (p) => p.replace(/\\/g, '/');
 
 const TAURI_CONF = 'src-tauri/tauri.conf.json';
-const CARGO_TOML = 'src-tauri/Cargo.toml';
+// 版本号在 workspace 根部，见文件头注释
+const CARGO_TOML = 'Cargo.toml';
 // 顶层 "version" 那一行；锚在行首（带缩进），避免误伤嵌套字段
 const TAURI_VERSION_RE = /^(\s*"version"\s*:\s*")([^"]*)(")/m;
-// [package] 段里的 version = "x.y.z"（dependencies 里是 `crate = "1"` 写法，不会误伤）
-const CARGO_VERSION_RE = /(^\[package\][\s\S]*?^version\s*=\s*")([^"]*)(")/m;
+// [workspace.package] 段里的 version = "x.y.z"。
+// 注意：成员 crate 里是 `version.workspace = true`（等号后没有字符串），本正则匹不到 —— 这是对的，
+// 匹到了反而说明有人在成员里写死了版本号，那正是要避免的。
+const CARGO_VERSION_RE = /(^\[workspace\.package\][\s\S]*?^version\s*=\s*")([^"]*)(")/m;
+// 成员 crate 路径，用于兜底检查「没人写死 version」
+const MEMBER_MANIFESTS = [
+  'src-tauri/Cargo.toml',
+  'crates/core/Cargo.toml',
+  'crates/hook/Cargo.toml',
+];
 
 // ---------------------------------------------------------------------------
 // 版本号：package.json → tauri.conf.json + Cargo.toml
@@ -112,10 +121,28 @@ function syncVersionIn(relPath, re, what) {
   log(`版本号同步: ${relPath} ${old} → ${version}`);
 }
 
+// 兜底：成员 crate 里出现字面量 `version = "x.y.z"` 就会盖掉 workspace 的值，
+// 而本脚本同步不到它 —— 那种情况下构建日志/版本资源会和安装包对不上，必须在这里掐掉。
+function assertNoHardcodedMemberVersion() {
+  for (const rel of MEMBER_MANIFESTS) {
+    const abs = join(ROOT, rel);
+    if (!existsSync(abs)) continue;
+    const m = readFileSync(abs, 'utf8').match(/^\[package\][\s\S]*?^version\s*=\s*"/m);
+    if (m) {
+      fail(
+        `${rel} 的 [package] 里写死了 version（${m[0].split('\n').pop().trim()}）。\n` +
+          `       版本号只在根 Cargo.toml 的 [workspace.package] 里维护，` +
+          `成员一律写 version.workspace = true。`,
+      );
+    }
+  }
+}
+
 // 两处都要同步，漏一个就会出现「安装包 1.1.6 / 构建日志 2.0.0」这种对不上
 function syncVersions() {
+  assertNoHardcodedMemberVersion();
   syncVersionIn(TAURI_CONF, TAURI_VERSION_RE, '顶层 "version" 字段');
-  syncVersionIn(CARGO_TOML, CARGO_VERSION_RE, '[package] 段的 version');
+  syncVersionIn(CARGO_TOML, CARGO_VERSION_RE, '[workspace.package] 段的 version');
 }
 
 const outDir = resolve(argOf('--out', join(ROOT, 'release')));

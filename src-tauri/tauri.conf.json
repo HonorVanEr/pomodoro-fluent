@@ -5,24 +5,13 @@
   "version": "1.1.6",
   "identifier": "com.pomodoro.fluent",
   "build": {
-    "frontendDist": "m0"
+    "frontendDist": "../renderer"
   },
   "app": {
-    "windows": [
-      {
-        "label": "main",
-        "title": "番茄钟",
-        "width": 300,
-        "height": 340,
-        "resizable": false,
-        "decorations": false,
-        "transparent": true,
-        "shadow": false,
-        "center": true
-      }
-    ],
+    "withGlobalTauri": true,
+    "windows": [],
     "security": {
-      "csp": "default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'; img-src 'self' data:;"
     }
   },
   "bundle": {

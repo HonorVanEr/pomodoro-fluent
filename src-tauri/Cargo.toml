@@ -1,11 +1,12 @@
 [package]
 name = "pomodoro"
-version = "1.1.6"
-edition = "2021"
+# 版本号/edition/license 从 workspace 继承（事实源是 package.json），别写死
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "Win11 Fluent 风格的番茄钟，带系统托盘与 agent 确认弹窗"
 authors = ["HonorVanEr"]
-license = "MIT"
-repository = "https://github.com/HonorVanEr/pomodoro-fluent"
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -15,3 +16,10 @@ tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 pomodoro-core = { path = "../crates/core" }
+# 单实例锁：第二次启动会直接退出，并把已有实例的窗口唤到前台
+# （等价 Electron 的 requestSingleInstanceLock + second-instance）。
+tauri-plugin-single-instance = "2"
+# 「检查更新」是应用唯一的联网动作，只在用户点按钮时发一次 HTTPS 请求。
+# 选 minreq 的理由：纯同步、无 tokio；3.x 的全部依赖都是 optional；
+# 用 https-native-tls 走系统 SChannel，不把 rustls/ring 打进包里（那会多出 ~1.5 MB）。
+minreq = { version = "3", default-features = false, features = ["https-native-tls"] }

@@ -1,8 +1,9 @@
 [package]
 name = "pomodoro-core"
-version = "2.0.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 description = "GUI 与 hook CLI 共享的核心逻辑"
-license = "MIT"
 
 [dependencies]

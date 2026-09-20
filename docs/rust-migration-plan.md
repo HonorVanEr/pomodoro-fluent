@@ -230,3 +230,98 @@ TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://ghfast.top cargo tauri build
 M0 只验证「能跑、能打包、体积达标」。窗口仍是 `src-tauri/m0/index.html` 占位页，
 `frontendDist` 也还指着 `m0`；M1 才切到 `../renderer` 并接上 `bridge.js`。
 `renderer/*` 至今一行未改。
+
+---
+
+## 10. M1 实测结果（2026-09-20）
+
+目标：把**真实的 `renderer/`** 接上 Tauri。硬约束 —— `renderer/` 一行不改。
+
+### 做了什么
+
+| 项 | 做法 |
+|---|---|
+| 前端来源 | `tauri.conf.json` 的 `frontendDist` 切到 `../renderer`（`m0` 占位页作废） |
+| 渲染层适配 | `src-tauri/src/bridge.js`，用 `initialization_script` **注入**，把 `window.pomodoro.*` 接到 Tauri invoke / event。**它是唯一适配层**，渲染层零改动 |
+| IPC 通道 | `withGlobalTauri: true` + `bridge.js` 内部**双通道**：优先 `window.__TAURI__.core.invoke`，退化到 `window.ipc.postMessage` |
+| 窗口行为 | `geometry` / `state` / `window` 三个模块：主窗、迷你模式、贴边隐藏、拖拽限位。纯几何部分带单元测试 |
+| 托盘 | `tray.rs`：图标染色、菜单重建、状态去重（等价 Electron 的 `syncTray`） |
+| 关于页 | `about.rs`：版本号、检查更新（**唯一联网点**，用户点了才发）、打开外链 |
+| 单实例 | `tauri-plugin-single-instance`，回调 = `reveal_main`（等价 Electron 的 `second-instance`） |
+| 版本同步 | `scripts/pack-release.mjs` 改为写根 `Cargo.toml` 的 `[workspace.package] version`，并**断言**各成员 crate 不得硬编码 `version = "..."` |
+
+### 验收结果
+
+| 检查项 | 结果 |
+|---|---|
+| 编译 | ✅ `cargo build` 无警告，exe 14,553,088 B（14.5 MB，debug） |
+| 单元测试 | ✅ **40 passed / 0 failed** |
+| bridge 对齐 | ✅ `scripts/check-bridge-parity.mjs`：`preload.js` 暴露 30 个方法 → `bridge.js` 30 个；`bridge.js` 调用的 15 个命令 → `commands.rs` 全部有定义 |
+| **`renderer/` 未改动** | ✅ `git status renderer/` 为空，且与主仓库 6 个文件**逐字节一致** |
+| IPC 链路实测 | ✅ 真起窗口，渲染层启动期的两个 invoke（`tray_update` + `pending_get_held`）都到达 Rust |
+
+### 补的两个工具（M1 新增）
+
+- **`scripts/check-bridge-parity.mjs`** —— 纯静态检查，不启应用。它抓的是 M1 最容易犯的错：
+  `bridge.js` 漏实现一个方法。渲染层里一个 `TypeError` 就会让整个界面死掉，而**进程照活、托盘照在**，
+  纯靠肉眼和"窗口起来了"完全看不出来。**实测有效**：它当场抓出 `requestHeldPending` 漏了
+  （渲染层 `app.js` 启动时**无条件**调用它，漏了就是启动即崩）。
+- **`scripts/smoke-tauri.mjs`** —— 真起 GUI 的冒烟，判定依据是 Rust 侧 `[smoke]` 三行 stderr
+  （见 `src-tauri/src/smoke.rs`，`POMODORO_SMOKE=1` 才启用）。
+
+  **为什么不用 CDP 进 webview**（试过，已放弃）：① WebView2 的 Browser 进程按用户数据目录共享，
+  被强杀的实例会留下孤儿 `msedgewebview2.exe`，新实例复用它 → 自定义协议整个不响应，而**窗口照画**；
+  ② 就算调试端口起来了，实测 t+3s 能看到页面、t+6s 起 DevTools 的 HTTP 端点整个不再响应，
+  断言还没跑完端点就死了。
+
+### ⚠ 踩坑（已解决）：冒烟"随机挂死"的真凶是残留实例，不是 WebView2
+
+**这段值得完整留着**，因为症状极具误导性，浪费了一整轮排查。
+
+**最初症状**：`WebviewWindowBuilder::build()` 看起来会**永久挂住** —— 埋点 `step: setup 进入`
+打了、`step: 主窗口已建` 永远不打，窗口不出现，进程一直活着。通过率从会话开始的 100%
+一路掉到 ~10%，"同一份二进制、零代码改动却越来越差" → 一度误判为**本机 WebView2 运行时退化**。
+
+**逐个排除的假设**（每个都单独做过对照，全部无效）：
+
+| 假设 | 结果 |
+|---|---|
+| WebView2 用户数据目录（`WEBVIEW2_USER_DATA_FOLDER` 指新目录） | 无关；且 Tauri 用自己的目录，这个环境变量实际不被采纳 |
+| 残留孤儿 `msedgewebview2.exe` | 无关 —— 本应用相关进程数为 0 |
+| 继承的 Chromium 环境变量（`CHROME_CRASHPAD_PIPE_NAME` / 代理 / `ELECTRON_RUN_AS_NODE`） | 略好但不解决；`env -i` 完全干净环境仍失败 |
+| `tauri-plugin-single-instance` | 摘掉后仍失败（5/8） |
+| 建窗口放 `setup()` vs `RunEvent::Ready` | 两处都失败，Ready 更差（1/10） |
+| `--disable-gpu` / 禁用 crash reporter | 无关 |
+| 窗口透明（`.transparent(true)` → WebView2 Composition Controller） | 关掉透明后仍失败（2/8） |
+| 磁盘 / 句柄 / profile 损坏 | 磁盘 31 GB 空闲；profile 仅 70 项 |
+
+**真凶**：残留的**应用实例**（以及它带起来的 WebView2 浏览器进程）。一旦有一个实例卡住没退，
+它会同时占住两样东西，于是后续每一次启动都必然失败，而且**失败长相和最初成因完全不同**：
+
+1. **单实例锁**被占 → 新实例在 `setup()` **之前**就被 `tauri-plugin-single-instance` 结束掉，
+   exit 0、一行 stderr 都不多打。指纹：`[smoke] 自检模式已启用` 有、`step: setup 进入` 没有。
+2. **WebView2 用户数据目录**被那个实例的浏览器进程占着 → 就算绕过了单实例锁，
+   新实例的 `CreateCoreWebView2EnvironmentWithOptions` 也会**堵在那里**（就是那个"build() 挂死"）。
+
+⇒ 这是**自我延续的陷阱**：初次偶发一次挂起之后，后面全部是它的回声。
+
+**为什么最初没发现**：`taskkill //F //IM pomodoro.exe //T` **从 Git Bash 里发经常不生效**
+（命令静默失败），被 `2>/dev/null` 吞掉了；`kill -9` 也依赖 bash 的 job pid。
+**必须用 PowerShell 的 `Stop-Process -Id <pid> -Force`**，并且要同时确认
+`Win32_Process` 里 `pomodoro.exe` 数为 0。
+
+**修复**：`scripts/smoke-tauri.mjs` 加了**前置检查** —— 开跑前先用 `tasklist` 确认没有实例在跑，
+有就直接报错退出（`exit 2`），不产出误导性的"失败"。想自动清掉可设 `TAURI_SMOKE_KILL_EXISTING=1`。
+
+**验证结果**：
+
+| 轮次 | 结果 |
+|---|---|
+| 干净状态第 1 轮（`TAURI_SMOKE_ATTEMPTS=1`，10 次） | ✅ **10 / 10** |
+| 干净状态第 2 轮（12 次） | ✅ **12 / 12** |
+
+**教训（写给未来的自己）**：GUI 冒烟测试的**第一步永远是确认进程表干净**。
+"测试脚本自己造成的假阴性"比"应用缺陷"更常见，而且更贵 —— 这次为它花的时间
+远超写 M1 本身。另外：**同一个二进制在零代码改动下表现变差，几乎一定不是应用代码的问题**。
+
+
