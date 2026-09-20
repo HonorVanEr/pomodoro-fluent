@@ -10,18 +10,41 @@
 //   node scripts/pack-release.mjs --only rust
 //   node scripts/pack-release.mjs --out <目录>
 //
-// 两条发布线**版本号各自独立**，本脚本不会把 package.json 的版本号写进
-// tauri.conf.json（那是单版本方案才需要做的事）：
-//   Electron 线 → package.json              → release/electron/
-//   Rust 线     → src-tauri/tauri.conf.json → release/rust/
-// 分两个子目录收集，方便分别 gh release create。
+// ## 版本号：只有一个事实源
 //
-// 发布约定见 docs/dual-release.md —— 尤其是 Rust 线 tag 必须带 `rust-` 前缀，
-// 否则两个版本的应用内「检查更新」会互相串线。
+// **`package.json` 的 `version` 是唯一事实源**，两份安装包共用一个版本号。
+// 打 Rust 包前脚本会把它同步写进这两个文件（都只替换版本号那一行，不动其它格式）：
+//   - `src-tauri/tauri.conf.json` → 决定安装包文件名与应用版本号
+//   - `src-tauri/Cargo.toml`     → 决定 exe 的版本资源与 `Compiling pomodoro vX.Y.Z`
+// 少同步一个就会出现「安装包是 1.1.6、构建日志写 2.0.0」这种对不上的情况。
+//
+// 升版本 = 只改 `package.json`（沿用既有的 `chore: bump version to X.Y.Z` 流程），
+// 然后跑一次本脚本把版本号带到 `tauri.conf.json`。别手工去改 tauri.conf.json。
+//
+// ## 发布形态：一个 tag，一个 release，两份安装包
+//
+// 产物统一落到 `release/`（不分子目录），一个 release 挂两份：
+//   Pomodoro-Fluent-Setup-X.Y.Z.exe        ← Electron 版
+//   Pomodoro-Fluent-Setup-X.Y.Z.exe.blockmap
+//   latest.yml
+//   Pomodoro-Fluent-Rust-Setup-X.Y.Z.exe   ← Rust / Tauri 版
+//
+// 两个文件名必须能一眼分辨 —— 它们挂在同一个 release 页面里，用户是照着
+// 文件名点下载的。别把它们改成容易混淆的名字。
+//
+// 发布约定见 docs/dual-release.md。
 // ---------------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
-import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync } from 'node:fs';
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -54,19 +77,49 @@ const run = (bin, args, extraEnv = {}) => {
   });
 };
 
-const readJson = (relPath) => JSON.parse(readFileSync(join(ROOT, relPath), 'utf8'));
+const readJson = (absPath) => JSON.parse(readFileSync(absPath, 'utf8'));
+const toPosix = (p) => p.replace(/\\/g, '/');
+
+const TAURI_CONF = 'src-tauri/tauri.conf.json';
+const CARGO_TOML = 'src-tauri/Cargo.toml';
+// 顶层 "version" 那一行；锚在行首（带缩进），避免误伤嵌套字段
+const TAURI_VERSION_RE = /^(\s*"version"\s*:\s*")([^"]*)(")/m;
+// [package] 段里的 version = "x.y.z"（dependencies 里是 `crate = "1"` 写法，不会误伤）
+const CARGO_VERSION_RE = /(^\[package\][\s\S]*?^version\s*=\s*")([^"]*)(")/m;
 
 // ---------------------------------------------------------------------------
-// 两条线各自的版本号（互不同步，各自独立演进）
+// 版本号：package.json → tauri.conf.json + Cargo.toml
 // ---------------------------------------------------------------------------
-const electronVersion = readJson('package.json').version;
-const rustVersion = existsSync(join(ROOT, 'src-tauri', 'tauri.conf.json'))
-  ? readJson(join('src-tauri', 'tauri.conf.json')).version
-  : '';
+const version = readJson(join(ROOT, 'package.json')).version;
+if (!/^\d+\.\d+\.\d+/.test(String(version || ''))) {
+  fail(`package.json 里的 version 不合法: ${JSON.stringify(version)}`);
+}
 
-const baseOut = resolve(argOf('--out', join(ROOT, 'release')));
-const electronOut = join(baseOut, 'electron');
-const rustOut = join(baseOut, 'rust');
+// 把版本号写进某个文件（只替换那一行的值，不动其它格式，git diff 干净）
+function syncVersionIn(relPath, re, what) {
+  const abs = join(ROOT, relPath);
+  if (!existsSync(abs)) fail(`找不到 ${relPath}`);
+  const src = readFileSync(abs, 'utf8');
+  const m = src.match(re);
+  if (!m) fail(`${relPath} 里没找到${what}`);
+  const old = m[2];
+  const next = src.replace(re, `$1${version}$3`);
+  if (next === src) {
+    log(`版本号同步: ${relPath} 已是 ${version}`);
+    return;
+  }
+  writeFileSync(abs, next);
+  log(`版本号同步: ${relPath} ${old} → ${version}`);
+}
+
+// 两处都要同步，漏一个就会出现「安装包 1.1.6 / 构建日志 2.0.0」这种对不上
+function syncVersions() {
+  syncVersionIn(TAURI_CONF, TAURI_VERSION_RE, '顶层 "version" 字段');
+  syncVersionIn(CARGO_TOML, CARGO_VERSION_RE, '[package] 段的 version');
+}
+
+const outDir = resolve(argOf('--out', join(ROOT, 'release')));
+mkdirSync(outDir, { recursive: true });
 
 const collected = [];
 
@@ -74,9 +127,7 @@ const collected = [];
 // Electron 线
 // ---------------------------------------------------------------------------
 function packElectron() {
-  if (!electronVersion) fail('package.json 里没有 version');
-  log(`—— Electron 线 v${electronVersion} ——`);
-  mkdirSync(electronOut, { recursive: true });
+  log(`—— Electron 版 v${version} ——`);
 
   run('npm', ['run', 'pack'], {
     // electron-builder 会清理 dist/win-unpacked（几十个文件），会被批量删除保护拦下
@@ -84,19 +135,31 @@ function packElectron() {
   });
 
   const wanted = [
-    `Pomodoro-Fluent-Setup-${electronVersion}.exe`,
-    `Pomodoro-Fluent-Setup-${electronVersion}.exe.blockmap`,
+    `Pomodoro-Fluent-Setup-${version}.exe`,
+    `Pomodoro-Fluent-Setup-${version}.exe.blockmap`,
     'latest.yml',
   ];
+  let hit = 0;
   for (const name of wanted) {
     const src = join(ROOT, 'dist', name);
     if (!existsSync(src)) {
       log(`  跳过（产物不存在）: dist/${name}`);
       continue;
     }
-    copyFileSync(src, join(electronOut, name));
-    collected.push(`electron/${name}`);
-    log(`  ✓ electron/${name}`);
+    copyFileSync(src, join(outDir, name));
+    collected.push(name);
+    hit += 1;
+    log(`  ✓ ${name}`);
+  }
+  if (hit === 0) {
+    const distList = existsSync(join(ROOT, 'dist'))
+      ? readdirSync(join(ROOT, 'dist')).filter((f) => /setup|\.yml$|blockmap/i.test(f))
+      : [];
+    fail(
+      `dist/ 里没找到 v${version} 的安装包。dist/ 里现有：` +
+        (distList.length ? distList.join(', ') : '(空)') +
+        `\n       多半是版本号对不上（electron-builder 是按 package.json 的 version 命名的）。`,
+    );
   }
 }
 
@@ -104,9 +167,7 @@ function packElectron() {
 // Rust 线
 // ---------------------------------------------------------------------------
 function packRust() {
-  if (!rustVersion) fail('src-tauri/tauri.conf.json 里没有 version');
-  log(`—— Rust 线 v${rustVersion} ——`);
-  mkdirSync(rustOut, { recursive: true });
+  log(`—— Rust / Tauri 版 v${version} ——`);
 
   const env = {};
   // 本机对 GitHub 的连接会被重置，而 tauri bundler 的 NSIS 工具链只从 GitHub releases 取。
@@ -119,33 +180,55 @@ function packRust() {
 
   const nsisDir = join(ROOT, 'target', 'release', 'bundle', 'nsis');
   if (!existsSync(nsisDir)) fail(`没找到 Tauri 产物目录: ${nsisDir}`);
-  const setups = readdirSync(nsisDir).filter((f) => f.toLowerCase().endsWith('.exe'));
-  if (setups.length === 0) fail(`Tauri 没产出任何 .exe（${nsisDir}）`);
+  const all = readdirSync(nsisDir).filter((f) => f.toLowerCase().endsWith('.exe'));
+  if (all.length === 0) fail(`Tauri 没产出任何 .exe（${nsisDir}）`);
+
+  // 只认当前版本号的产物。target/ 里会留着上一次打包的旧安装包（改过版本号后文件名不同），
+  // 全部照抄的话旧包会顶掉新包 —— 实测踩过（旧 2.0.0 覆盖了新 1.1.6，且日志里看着像成功）。
+  const setups = all.filter((f) => f.includes(version));
+  const stale = all.filter((f) => !f.includes(version));
+  if (stale.length) {
+    log(`  忽略 ${stale.length} 个旧版本产物（可在 ${toPosix(nsisDir)} 里删掉）: ${stale.join(', ')}`);
+  }
+  if (setups.length === 0) {
+    fail(`没找到 v${version} 的安装包；${nsisDir} 里只有: ${all.join(', ')}`);
+  }
+  if (setups.length > 1) {
+    // 将来若同时出 x64 / arm64 两个包，得先把文件名区分开再进来改这里，别默认覆盖
+    fail(`v${version} 匹配到多个安装包，无法确定发哪个: ${setups.join(', ')}`);
+  }
 
   for (const file of setups) {
-    // 统一改名，免得和 Electron 版在同一个 release 页面里看不出谁是谁
-    const target = `Pomodoro-Fluent-Rust-Setup-${rustVersion}.exe`;
-    copyFileSync(join(nsisDir, file), join(rustOut, target));
-    collected.push(`rust/${target}`);
-    log(`  ✓ rust/${target}  (← ${file})`);
+    // 统一改名：和 Electron 版挂在同一个 release 页面里，看不出谁是谁就糟了
+    const target = `Pomodoro-Fluent-Rust-Setup-${version}.exe`;
+    copyFileSync(join(nsisDir, file), join(outDir, target));
+    collected.push(target);
+    const mb = (statSync(join(outDir, target)).size / 1048576).toFixed(2);
+    log(`  ✓ ${target}  ${mb} MB  (← ${file})`);
   }
 }
 
 // ---------------------------------------------------------------------------
+// 先同步版本号，再分别打包
+// ---------------------------------------------------------------------------
+syncVersions();
+
 if (ONLY === 'all' || ONLY === 'electron') packElectron();
 if (ONLY === 'all' || ONLY === 'rust') packRust();
 
 log('');
-log(`完成，共 ${collected.length} 个产物落 ${baseOut}`);
+log(`完成，共 ${collected.length} 个产物落 ${outDir}`);
 for (const name of collected) log(`  ${name}`);
 
+if (ONLY === 'all' && collected.some((n) => n.includes('-Rust-Setup-'))) {
+  log('');
+  log(`提示：Rust 版当前只到 M0（占位空窗 + 托盘），还没功能对齐；`);
+  log(`      要只发 Electron 版就删掉 Pomodoro-Fluent-Rust-Setup-${version}.exe。`);
+}
+
 log('');
-log('下一步：两条线各自发一个 release（tag 前缀是硬约定，别省）');
-// gh 在 Windows 上吃反斜杠，但提示是给人复制粘贴的，统一成正斜杠
-const p = (dir) => dir.replace(/\\/g, '/');
-if (ONLY !== 'rust' && electronVersion) {
-  log(`  gh release create v${electronVersion} --target <mergeCommit> --title v${electronVersion} "${p(electronOut)}"/*`);
-}
-if (ONLY !== 'electron' && rustVersion) {
-  log(`  gh release create rust-v${rustVersion} --target <mergeCommit> --title "Rust 版 ${rustVersion}" "${p(rustOut)}"/*`);
-}
+log('下一步：一个 tag 一个 release，两份安装包挂在一起');
+log(`  gh release create v${version} --target <mergeCommit> --title v${version} ${toPosix(outDir)}/*`);
+log('');
+log(`（tag 是 v${version}，不带任何前缀 —— 两版版本号统一，别加 rust- 之类的前缀，`);
+log('  否则 app:check-update 的 /releases/latest 会挑不到它。）');

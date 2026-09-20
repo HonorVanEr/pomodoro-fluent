@@ -112,7 +112,11 @@ serde 类型定义，契约不会两边写歪。备选：保留 Node 子进程�
 ### D4 · 版本与分支策略
 
 - 现在：worktree `pomodoro-fluent-rust` / 分支 `tauri-rewrite`（已建好，基于 `main@5f1bcd1`）
-- 建议：功能对齐后作为 **v2.0.0** 发布；Electron 版在 main 上冻结保留，打 tag 归档
+- **两版并存 + 统一版本号**：同一个仓库里同时留两套实现，一次打包出两份安装包，
+  挂在同一条 release（tag `vX.Y.Z`，**不带前缀**）。版本号只有一个事实源：`package.json`，
+  由 `scripts/pack-release.mjs` 同步进 `tauri.conf.json`。详见 `docs/dual-release.md`。
+- **不把 Rust 版号单独抬到 2.0.0**：版本号属于整个仓库，两版一起走。
+  真要换大版本号（功能对齐时）只改 `package.json` 一处。
 - hook 配置迁移：老用户的 `~/.claude/settings.json` 里是 `node ".../pomodoro-hook.js"`，
   新 `install --clean` 必须能识别并替换（现有逻辑保留，只改 `hookCmd()` 一处即可——
   实测全文只有第 1182 行一处拼命令）
@@ -162,7 +166,7 @@ serde 类型定义，契约不会两边写歪。备选：保留 Node 子进程�
 | **M2** | 网关 Rust 化 + 弹窗（ask / permission）+ 三层超时 + held 状态机 | 三个唤回入口全通 |
 | **M3** | hook CLI Rust 化 + `install` 子命令 + 四处文档同步 | 各宿主真实 CLI 跑通 |
 | **M4** | `scripts/smoke-interaction.js` 迁移为 Rust 集成测试 | 冒烟用例全绿 |
-| **M5** | 打包 + 冒烟 + 发 v2.0.0；main 上的 Electron 版归档 | 安装包体积实测对比 |
+| **M5** | 打包 + 冒烟 + 发新版（与 Electron 版同号、同一条 release） | 安装包体积实测对比 |
 
 M0 结束时就能拿到真实体积数字——建议**先做完 M0 再决定要不要一路推到底**。
 
@@ -175,8 +179,8 @@ M0 结束时就能拿到真实体积数字——建议**先做完 M0 再决定�
 | Rust | ✅ 1.96.0，默认 host `x86_64-pc-windows-msvc` |
 | MSVC 链接器 | ✅ VS 2022 + Windows SDK 10.0.26100 |
 | WebView2 运行时 | ✅ 已装 152.0.4191.66 / 153.0.4234.32 |
-| `cargo-tauri` CLI | ❌ 待装（`cargo install tauri-cli --version "^2"`，首次编译数分钟） |
-| Node | 仅测试期需要，**不再随包发布** |
+| `cargo-tauri` CLI | ✅ 已装（`cargo install tauri-cli --version "^2"`，实测 2.11.6） |
+| Node | 仅 Electron 版与打包脚本需要；**Rust 版不随包发布 Node** |
 
 ---
 
@@ -194,7 +198,7 @@ M0 结束时就能拿到真实体积数字——建议**先做完 M0 再决定�
 | 检查项 | 结果 |
 |---|---|
 | `cargo build --release` | ✅ 3m48s（tauri 2.11.6 / tao 0.35.3 / tray-icon 0.24.2 / webview2-com 0.38.2） |
-| `cargo tauri build` → NSIS | ✅ `target/release/bundle/nsis/番茄钟_2.0.0_x64-setup.exe` |
+| `cargo tauri build` → NSIS | ✅ `target/release/bundle/nsis/番茄钟_1.1.6_x64-setup.exe`（M0 当时是 2.0.0，后统一到 `package.json` 的版本号） |
 | **安装包体积** | **1,065,276 B（1.04 MB）** —— Electron 版 89 MB，**-98.9%** |
 | GUI exe | 2,791,424 B（2.66 MB） |
 | hook exe | 110,080 B（107 KB） |

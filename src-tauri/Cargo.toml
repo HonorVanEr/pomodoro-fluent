@@ -1,6 +1,6 @@
 [package]
 name = "pomodoro"
-version = "2.0.0"
+version = "1.1.6"
 edition = "2021"
 description = "Win11 Fluent 风格的番茄钟，带系统托盘与 agent 确认弹窗"
 authors = ["HonorVanEr"]
