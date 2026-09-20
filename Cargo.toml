@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/core", "crates/hook"]
+
+# 体积优先。实测目标：GUI exe + hook exe 合计进个位数 MB。
+# 注意：`[profile.*]` 只能写在 workspace 根部，写在成员 crate 里会被忽略。
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false

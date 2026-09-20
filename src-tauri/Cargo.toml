@@ -1,0 +1,17 @@
+[package]
+name = "pomodoro"
+version = "2.0.0"
+edition = "2021"
+description = "Win11 Fluent 风格的番茄钟，带系统托盘与 agent 确认弹窗"
+authors = ["HonorVanEr"]
+license = "MIT"
+repository = "https://github.com/HonorVanEr/pomodoro-fluent"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+pomodoro-core = { path = "../crates/core" }

@@ -25,12 +25,15 @@
 
 ### 迁移后体积预期
 
-| | 现在 | Tauri v2 预期 |
+| | 现在（Electron v1.1.6） | Tauri v2（**M0 已实测**） |
 |---|---|---|
-| 主程序 | 234 MB | 3–5 MB |
-| hook CLI | 76 KB 脚本（**依赖宿主机装 Node**） | ~1–2 MB 静态 exe（零依赖） |
-| 安装包 | 90 MB | **4–8 MB**（不含 WebView2 引导包） |
-| 常驻内存 | 150–250 MB | 60–120 MB（WebView2 仍是多进程，别期待数量级下降） |
+| 主程序 exe | 234 MB | **2.66 MB** |
+| hook CLI | 76 KB Node 脚本（**依赖宿主机装 Node**） | **107 KB 静态 exe（零依赖）** |
+| NSIS 安装包 | 89 MB | **1.04 MB** |
+| 宿主进程常驻内存 | — | 25 MB（WebView2 子进程另计） |
+
+⇒ 安装包 **-98.9%**；两个 exe 合计 2.77 MB —— 比 Electron 版白带的
+`LICENSES.chromium.html`（19.5 MB）还小一个数量级。
 
 > 诚实说明：**内存和启动速度的收益远小于体积收益**。WebView2 同样是 Chromium，只是从「每个
 > 应用自带一份」变成「系统共用一份」。真正的大头收益是磁盘与分发。
@@ -183,3 +186,43 @@ M0 结束时就能拿到真实体积数字——建议**先做完 M0 再决定�
 - 不加任何遥测、不上报、不打通外部服务
 - 不恢复任何「工作记录 / 报告」能力
 - 不引入 npm 前端工具链（渲染层无打包器，继续维持零构建）
+
+---
+
+## 9. M0 实测结果（2026-09-20 已完成）
+
+| 检查项 | 结果 |
+|---|---|
+| `cargo build --release` | ✅ 3m48s（tauri 2.11.6 / tao 0.35.3 / tray-icon 0.24.2 / webview2-com 0.38.2） |
+| `cargo tauri build` → NSIS | ✅ `target/release/bundle/nsis/番茄钟_2.0.0_x64-setup.exe` |
+| **安装包体积** | **1,065,276 B（1.04 MB）** —— Electron 版 89 MB，**-98.9%** |
+| GUI exe | 2,791,424 B（2.66 MB） |
+| hook exe | 110,080 B（107 KB） |
+| GUI 冒烟 | ✅ 启动后 7s 仍存活，宿主进程 25 MB，WebView2 子进程正常拉起，托盘图标出现 |
+| hook stdout | ✅ `pomodoro-hook.exe` → `{"continue":true}`，exit 0（验证了双 exe 的必要性） |
+
+### 踩坑：GitHub 被墙导致 NSIS 打包失败
+
+首次 `cargo tauri build` 报 `Error failed to bundle project: timeout: global` —— bundler 需要从
+GitHub releases 下载 NSIS 工具链与 `nsis_tauri_utils.dll`，而本机对 GitHub 的连接被重置
+（`curl` 直接 `Recv failure: Connection was reset`）。
+
+**解法（用 Tauri 自带的正规开关，别去手工解压布局）**：
+
+```bash
+TAURI_BUNDLER_TOOLS_GITHUB_MIRROR=https://ghfast.top cargo tauri build
+```
+
+该环境变量真实存在于 `cargo-tauri.exe` 中（`grep -a -o -E "TAURI_[A-Z_]{3,50}" cargo-tauri.exe`
+能查出来），它把下载地址拼成 `https://ghfast.top/https://github.com/...`。
+实测 `ghfast.top` / `gh-proxy.com` / `ghproxy.net` 可用；`gh.llkk.cc` / `ghproxy.cc` 不通。
+
+工具链落在 `%LOCALAPPDATA%\tauri\NSIS\`。若装坏了下错版本，直接删掉该目录再重跑即可
+（删的时候要用 MSYS 风格路径 `/c/Users/...`，不要用 `$LOCALAPPDATA`，否则会被 safe-delete
+拦截并 fail-closed）。
+
+### M0 的边界
+
+M0 只验证「能跑、能打包、体积达标」。窗口仍是 `src-tauri/m0/index.html` 占位页，
+`frontendDist` 也还指着 `m0`；M1 才切到 `../renderer` 并接上 `bridge.js`。
+`renderer/*` 至今一行未改。

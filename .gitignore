@@ -5,6 +5,10 @@ node_modules/
 dist/
 out/
 
+# Rust / Tauri 构建产物
+target/
+src-tauri/gen/
+
 # 缓存与测试临时文件
 .electron-cache/
 .env-test/
