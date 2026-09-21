@@ -2675,7 +2675,7 @@ dependencies = [
 
 [[package]]
 name = "pomodoro"
-version = "1.1.6"
+version = "1.2.0"
 dependencies = [
  "getrandom 0.3.4",
  "minreq",
@@ -2690,11 +2690,11 @@ dependencies = [
 
 [[package]]
 name = "pomodoro-core"
-version = "1.1.6"
+version = "1.2.0"
 
 [[package]]
 name = "pomodoro-hook"
-version = "1.1.6"
+version = "1.2.0"
 dependencies = [
  "pomodoro-core",
  "serde_json",
