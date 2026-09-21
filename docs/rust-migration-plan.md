@@ -698,4 +698,131 @@ opencode 的 `{status}` 三态与 `{reject}`，外加**铁律用例**：
 4. 上面 1、2 都是被 §3b/§3c **每条用例都带期望值**（非空 / 静默）的断言逼出来的 ——
    若只比「两边是否相同」，这三个坑全会以 PASS 的面目留下。
 
+---
+
+## 14. M5 实测结果（2026-09-21）
+
+目标：**打包 + 冒烟 + 发新版**（与 Electron 版同号、同一条 release）。验收：**安装包体积实测对比**。
+
+一句话：两份安装包第一次挂到同一条 release（`v1.2.0`）；而 **M5 的打包审计挖出一个从 M1 就在的真缺口**
+—— NSIS 原先只装 GUI，**hook CLI 与 OpenCode 插件根本没进包**。
+
+### 做了什么
+
+| 项 | 做法 |
+|---|---|
+| 并入 `main` | PR #16：`tauri-rewrite`（M0–M4 共 11 个提交）→ `main`。`main` 是它的祖先，内容可 fast-forward |
+| 升版本 | PR #17：`1.1.6` → `1.2.0`。三处统一：`package.json` 手改 + `tauri.conf.json` / `Cargo.toml` 由脚本同步 + `Cargo.lock`。语义取 **minor**（新增一条实现线），不跳 `2.0.0` |
+| 打包 | `CODEBUDDY_SAFE_DELETE_ENABLED=0 npm run pack:all`（Rust worktree 里先 `npm install`） |
+| 修缺口 | PR #18：`bundle.resources` 补 hook exe + OpenCode 插件（详见下节） |
+| 发布 | `gh release create v1.2.0 --target c04f3fb`，两份安装包 + blockmap + `latest.yml` |
+
+三次 PR 的 merge commit：`38b6ff5` → `f5ecf82` → **`c04f3fb`**（tag 指向它）。
+每次都在打包后核对「打包用的 commit」与 `main` 的 `git diff --stat` 为空，产物才复用。
+
+### 体积实测对比
+
+| | 字节数 | 说明 |
+|---|---|---|
+| **Electron 安装包** | **94,168,782 B（89.8 MB）** | 现行实现 |
+| **Rust / Tauri 安装包** | **1,363,113 B（1.30 MB）** | **−98.55%**，约 **69×** |
+| （参考）上一版 Electron `1.1.6` | 94,168,633 B | 只差 **149 B** —— Electron 侧无体积回归 |
+| （参考）M0 占位版 Rust | 1,065,276 B | M0 只是空窗 + 托盘，没有业务代码 |
+
+拆解：Rust 侧 = GUI exe 3,310,592 B（3.16 MB）+ hook exe 416,768 B（407 KB）+ NSIS 自身开销，
+LZMA 压到 1.30 MB。Electron 侧光 `dist/win-unpacked/番茄钟.exe` 单文件就有 **246,070,272 B**（含 Electron 运行时）。
+
+> ⚠ 记一下 hook exe 的真实体积：M3 文档里写的「release 侧 M0 实测 107 KB」是 **M0 的占位 stub**；
+> 实现完整 hook CLI 之后 release 是 **407 KB**（debug 构建 1.48 MB）。别再引用 107 KB。
+
+### ⚠ 打包审计挖出的真缺口：NSIS 只装了 GUI
+
+生成的 `target/release/nsis/x64/installer.nsi` 里**只有一条文件打包指令**：
+
+```nsis
+File "${MAINBINARYSRCPATH}"
+```
+
+（`; Copy resources` / `; Copy external binaries` 两处都是空注释 —— 因为 `bundle.resources`
+与 `externalBin` 都没配，mustache 块展开后什么都没有。）
+
+而运行时是**从 exe 同级目录**取这两样的：
+
+| 读取方 | 找什么 |
+|---|---|
+| `src-tauri/src/config.rs` 的 `ensure_hook_exe()` | `<exe目录>/pomodoro-hook.exe` |
+| `crates/core` 的 `resolve_plugin_source()` | `<exe目录>/opencode/pomodoro-opencode.ts` |
+
+⇒ 装完的 Rust 版点「一键安装 hook」会失败，OpenCode 插件也不会被释放。
+**这个缺口从 M1 就在**：M1–M4 全都在开发目录里跑，`target/release/pomodoro-hook.exe`
+天然躺在 GUI exe 旁边，`ensure_hook_exe()` 一直能找着，所以从来没暴露 ——
+**只有真去检查安装包内容（而不是跑 `target/release/` 里的 exe）才会发现**。
+
+修法：`bundle.resources` 的 map 是 **`{ 源: 目标 }`**（见 `tauri-utils` 的
+`ResourcePathsIter::next_pattern`：`let (pattern, dest) = iter.next()`），
+模板会把每一项展开成 `CreateDirectory "$INSTDIR\<目标目录>"` + `File /a "/oname=<目标>" "<源>"`：
+
+```json
+"resources": {
+  "../target/release/pomodoro-hook.exe": "pomodoro-hook.exe",
+  "../bin/opencode/pomodoro-opencode.ts": "opencode/pomodoro-opencode.ts"
+}
+```
+
+配套：**`cargo tauri build` 只构建 GUI 那一个 bin**，不会顺带构建 workspace 里的
+`pomodoro-hook`，所以在打 Rust 包前必须先 `cargo build --release -p pomodoro-hook`。
+漏了这一步的两种失败长相：
+
+- 干净 checkout 上 `resources` 的源文件不存在 → 打包直接失败（好，fail-closed）；
+- 本地有上一次的产物 → 打包「成功」，但装进去的是**上一版**的 hook exe（更隐蔽）。
+
+修完实测：`installer.nsi` 多出 `CreateDirectory "$INSTDIR\opencode"` 与两条 `File /a`；
+安装包 1.20 → 1.30 MB。
+
+### 位置口径的坑：版本号同步到哪一层
+
+`Cargo.toml` 的 `[workspace.package] version` 对两个 exe 的作用**不一样**：
+
+| exe | 版本号体现在哪 |
+|---|---|
+| `pomodoro.exe`（GUI） | 构建日志 + **PE 版本资源**（`tauri-build` 会嵌入）→ `FileVersion=1.2.0` |
+| `pomodoro-hook.exe` | **只有构建日志**（`Compiling pomodoro-hook v1.2.0`）；`crates/hook` 没有 `build.rs`，PE 版本资源是**空的** |
+
+后者是已知无害缺口（纯元数据），要补得引入 `winresource` / `embed-resource` 之类的
+build 依赖，本次未做 —— 已写进 `pack-release.mjs` 的文件头注释，避免下次误以为「同步了版本号 = 资源也有了」。
+
+### 冒烟
+
+| 检查项 | 结果 |
+|---|---|
+| `cargo test --workspace` | ✅ **146 passed / 0 failed / 0 warnings**（GUI 76 / core 8 / hook 62） |
+| hook exe 裸跑 | ✅ 空 stdout + exit 0（**与 JS 版逐字一致**，网关不在时静默退出） |
+| `install --agent claude --print` | ✅ 隔离 `USERPROFILE`/`HOME` 后写出正确配置，命令指向 exe |
+| bridge/commands 静态对齐 | ✅ 30 个桥接方法 / 23 个命令全部对上 |
+| Electron 打包产物 | ✅ asar 版本 `1.2.0`；`POMODORO_SMOKE_INSTALL=1` 成功路径走通，写进隔离临时 home |
+| `latest.yml` | ✅ version / size / sha512 与安装包一致（94,168,782 B） |
+| NSIS 打包内容 | ✅ `installer.nsi` 有 `CreateDirectory "$INSTDIR\opencode"` + 两条 `File /a` |
+| Rust GUI 握手（`smoke-tauri.mjs`） | ⏸ **未跑** —— 本机正跑着用户装的实例，占着单实例锁 |
+
+### ⚠ 踩坑
+
+1. **`install --print` 不隔离 `USERPROFILE` 会把真实的 `~/.claude/settings.json` 整个打印出来**
+   —— 连里面的 `ANTHROPIC_AUTH_TOKEN` 一起。M3 的差分脚本一直在做隔离，但**手敲命令时极容易忘**。
+   凡是跑 `install`，先把 `USERPROFILE` / `HOME` 重定向到临时目录（路径给 Windows 反斜杠形式）。
+2. **`app.exit(0)` 会吞掉 Electron 冒烟日志**：冒烟的成功 / 失败两条路径其实都跑了
+   （代码是顺序执行，且进程是在失败路径跑完之后才退的），但失败路径那行的 stdout
+   在硬退出时被丢 —— 连跑两次都只剩成功那条。**别据此判定「失败路径没跑」**。
+3. **hook exe 的裸跑输出随实现变过**：M0 的占位 stub 吐 `{"continue":true}`，
+   M3 的真 CLI 在无参数 + 无网关时是**空 stdout**。拿 M0 的期望去套会误判成回归
+   —— 本次就误判了一次，用 JS 版并排对照才确认等价。**跨阶段引用期望值前先确认它属于哪个实现**。
+4. `release/` 会留着上几次 `pack:*` 的产物（本次就躺着一个 `...Rust-Setup-1.1.6.exe`），
+   而发布命令用的是 `release/*` 通配 —— **会把它一起传上去**。发布前必须逐个核对目录内容。
+
+### 已知遗留
+
+- Rust GUI 握手冒烟（`smoke-tauri.mjs`）本次没跑成，原因是单实例锁被人占着。
+  M1–M4 跑过多次（干净状态 22/22），且本次 GUI 源码相比 M4 未变（只多了版本资源），
+  风险低；但要留个尾巴：下次干净进程表时补跑一次。
+- hook exe 无 PE 版本资源（见上「位置口径的坑」）。
+
 
