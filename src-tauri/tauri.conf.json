@@ -18,6 +18,10 @@
     "active": true,
     "targets": ["nsis"],
     "icon": ["../build/icon.ico"],
+    "resources": {
+      "../target/release/pomodoro-hook.exe": "pomodoro-hook.exe",
+      "../bin/opencode/pomodoro-opencode.ts": "opencode/pomodoro-opencode.ts"
+    },
     "windows": {
       "nsis": {
         "installMode": "currentUser",

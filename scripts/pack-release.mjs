@@ -15,8 +15,13 @@
 // **`package.json` 的 `version` 是唯一事实源**，两份安装包共用一个版本号。
 // 打 Rust 包前脚本会把它同步写进这两个文件（都只替换版本号那一行，不动其它格式）：
 //   - `src-tauri/tauri.conf.json` → 决定安装包文件名与应用版本号
-//   - `src-tauri/Cargo.toml`     → 决定 exe 的版本资源与 `Compiling pomodoro vX.Y.Z`
+//   - `src-tauri/Cargo.toml`     → 决定 `Compiling <crate> vX.Y.Z` 与 **GUI exe 的版本资源**
 // 少同步一个就会出现「安装包是 1.1.6、构建日志写 2.0.0」这种对不上的情况。
+//
+// ⚠ 已知无害缺口：**hook exe 的 PE 版本资源是空的**。GUI 的版本资源由 tauri-build 嵌入，
+//   而 `crates/hook` 没有 build.rs，Cargo.toml 的版本号只体现在构建日志里
+//   （`(Get-Item pomodoro-hook.exe).VersionInfo.FileVersion` 为空）。
+//   要补得引入 winresource / embed-resource 之类的 build 依赖；纯元数据，未做。
 //
 // 升版本 = 只改 `package.json`（沿用既有的 `chore: bump version to X.Y.Z` 流程），
 // 然后跑一次本脚本把版本号带到 `tauri.conf.json`。别手工去改 tauri.conf.json。
@@ -203,6 +208,16 @@ function packRust() {
     env.TAURI_BUNDLER_TOOLS_GITHUB_MIRROR = 'https://ghfast.top';
     log('  未设 TAURI_BUNDLER_TOOLS_GITHUB_MIRROR，本次用 https://ghfast.top');
   }
+
+  // ⚠ 必须**先**构建 hook exe，再 `cargo tauri build`。
+  // hook exe 是 sidecar（`tauri.conf.json` 的 `bundle.resources` 把它打进 $INSTDIR，
+  // 与 GUI 同级），而 `cargo tauri build` **只构建 GUI 那一个 bin**，不会顺带构建
+  // workspace 里的 `pomodoro-hook`。漏了这一步的两种失败长相：
+  //   ① 干净 checkout 上 resources 的源文件不存在 → 打包直接失败；
+  //   ② 本地有上一次的产物 → 打包"成功"，但装上去的是**上一版**的 hook exe
+  //      （版本资源陈旧，且新改的 hook 逻辑根本没进包）——更隐蔽。
+  run('cargo', ['build', '--release', '-p', 'pomodoro-hook'], env);
+
   run('cargo', ['tauri', 'build'], env);
 
   const nsisDir = join(ROOT, 'target', 'release', 'bundle', 'nsis');
