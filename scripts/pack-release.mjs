@@ -249,8 +249,8 @@ for (const name of collected) log(`  ${name}`);
 
 if (ONLY === 'all' && collected.some((n) => n.includes('-Rust-Setup-'))) {
   log('');
-  log(`提示：Rust 版当前只到 M0（占位空窗 + 托盘），还没功能对齐；`);
-  log(`      要只发 Electron 版就删掉 Pomodoro-Fluent-Rust-Setup-${version}.exe。`);
+  log('提示：Rust 版功能已对齐（M5），两份安装包可以一起挂到同一条 release；');
+  log(`      若要本次只发 Electron 版，删掉 Pomodoro-Fluent-Rust-Setup-${version}.exe 即可。`);
 }
 
 log('');
