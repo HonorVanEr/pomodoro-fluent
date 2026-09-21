@@ -23,3 +23,16 @@ tauri-plugin-single-instance = "2"
 # 选 minreq 的理由：纯同步、无 tokio；3.x 的全部依赖都是 optional；
 # 用 https-native-tls 走系统 SChannel，不把 rustls/ring 打进包里（那会多出 ~1.5 MB）。
 minreq = { version = "3", default-features = false, features = ["https-native-tls"] }
+
+# Agent 网关：本地 HTTP 服务（127.0.0.1）。
+# 选 tiny_http 而不是 axum/hyper：后者要拉一整套 tokio，编进包里是 MB 级开销，
+# 而这里的并发模型不需要异步 —— 每个 hook 一条连接，长轮询就是那条连接上的
+# 线程在 `recv_timeout` 里等，天然对上「HTTP 请求挂着、用户稍后作答」的语义。
+# tiny_http 也把 Expect: 100-continue（curl -d 超 1KB 会发）、chunked、
+# 半关闭这些容易写错的 HTTP/1.1 细节处理掉了。
+tiny_http = "0.12"
+
+# 网关门禁用的随机 token（48 位十六进制）与交互 id。
+# 必须用系统 CSPRNG，不能拿时间戳凑数 —— token 是 127.0.0.1 上唯一的门禁，
+# 同一台机器上的其他进程能直接连上来。Electron 版用的是 crypto.randomBytes(24)。
+getrandom = "0.3"

@@ -324,4 +324,139 @@ M0 只验证「能跑、能打包、体积达标」。窗口仍是 `src-tauri/m0
 "测试脚本自己造成的假阴性"比"应用缺陷"更常见，而且更贵 —— 这次为它花的时间
 远超写 M1 本身。另外：**同一个二进制在零代码改动下表现变差，几乎一定不是应用代码的问题**。
 
+---
+
+## 11. M2 实测结果（2026-09-21）
+
+目标：**网关 Rust 化 + 弹窗（ask / permission）+ 三层超时 + held 状态机**。
+硬约束不变 —— `renderer/` 一行不改。验收项：**三个唤回入口全通**。
+
+### 做了什么
+
+| 模块 | 行数 | 对应 Electron 侧 | 说明 |
+|---|---|---|---|
+| `payload.rs` | ~700 | `gateway.js` 的 `normalize*` 家族 | 纯函数，入参归一化（题/选项/权限/建议/按钮/上下文/文案上限） |
+| `interaction.rs` | ~560 | `gateway.js` 的 `pendingInteractions` | 挂起交互状态机：`active` / `held`、三种收尾、三条唤回入口 |
+| `popup.rs` | ~340 | `main.js` 的 `showNotify` | 弹窗窗口：单窗口策略、逻辑像素尺寸、右上角定位、600ms 兜底显示 |
+| `gateway.rs` | ~1180 | `gateway.js`（772 行） | 本地 HTTP 网关：5 个端点、token 鉴权、Host 校验、活动计数、自检 |
+| `config.rs` | ~90 | `main.js` 的 config 读写 | `<userData>/config.json`，`gatewayEnabled` 缺省 true |
+| `tray.rs`（改） | — | `rebuildTrayMenu` / `refreshPendingTray` | 菜单顶部「待处理的确认（N）」+「选择要处理的…」子菜单 + 左键单击唤回 |
+| `commands.rs`（改） | — | `ipcMain.on(...)` 那批 | `notify_*` / `interaction_*` / `gateway_*` 共 11 个命令 |
+| `bridge.js`（改） | — | `preload.js` | 把 M1 的 8 个 `notImplemented` 占位换成真调用 |
+| `main.rs`（改） | — | — | 模块注册、网关随启动、**`CloseRequested` 按 label 收窄到主窗口**、`Exit` 时停网关 |
+
+**HTTP 依赖选型**：`tiny_http` 0.12（不是 axum/hyper）。理由：后两者要拉一整套 tokio，
+编进包里是 MB 级开销；而这里的并发模型不需要异步 —— 每个 hook 一条连接，长轮询就是
+那条连接上的线程在 `recv_timeout` 里等，天然对上「HTTP 请求挂着、用户稍后作答」的语义。
+`tiny_http` 还顺手把 `Expect: 100-continue`（curl 的 `-d` 超 1KB 会发）、chunked、
+半关闭这些容易写错的 HTTP/1.1 细节处理掉了。
+
+**线程模型**：交互表放 `AppState`，每条挂起的交互带一根 `mpsc::Sender<Decision>`；
+发起请求的 HTTP 线程拿 `Receiver` 去 `wait`（`recv_timeout`）。
+于是「超时」不需要额外的定时器线程，而「暂时收起」天然满足「不停表」——它只改
+`state`，通道没人发东西，`recv_timeout` 继续数着。
+用户点击与超时那一刻的竞态由「**谁先从表里 `remove` 掉那条**」裁决（同一把锁里做的
+`remove` + `send`），不存在「用户点了允许、结果回了 deny」这类最不能接受的错。
+
+**单窗口策略**：弹窗 label = `notify-<id>`。新弹窗顶掉旧的时会先把旧的按 `dismissed`
+收尾（`action=null` → 调用方回退宿主原生询问），但**放过 `held` 的** ——
+用户点名要稍后处理，不该被一条新通知替他丢掉。
+
+### 验收结果
+
+| 检查项 | 结果 |
+|---|---|
+| 编译 | ✅ `cargo build --workspace` **0 警告** |
+| 单元测试 | ✅ **72 passed / 0 failed**（M1 是 40；新增 32 条，`pomodoro-core` 2 条不变） |
+| bridge 对齐 | ✅ `check-bridge-parity.mjs`：`preload.js` 30 个方法 → `bridge.js` 30 个；`bridge.js` 调用的 **23** 个命令 → `commands.rs` 全部有定义 |
+| **`renderer/` 未改动** | ✅ 与主仓库 `renderer/` **逐字节一致**（`diff -r` 无输出） |
+| M1 GUI 握手（回归） | ✅ `smoke-tauri.mjs`：`设置→主窗→托盘→网关→setup 返回`，两个启动期 invoke 都到达 |
+| **网关全链路** | ✅ `smoke-gateway.mjs`：**11 项 / 0 失败**（见下表） |
+| **唤回入口** | ⚠ 见下（自动化覆盖入口 ①，②③ 需真机手点一次） |
+
+网关自检 11 项（`scripts/smoke-gateway.mjs`，`TAURI_SMOKE_POPUP=1`）：
+
+```
+PASS health                              PASS event(notification)
+PASS status                              PASS event(tool-after)
+PASS host-reject(403)                    PASS interaction(permission, timeout→deny)
+PASS auth-reject(401)                    PASS interaction(ask, timeout→cancel)
+PASS confirm(custom, timeout)            PASS interaction(permission, 弹窗内作答→user)
+                                         PASS interaction(permission, 收起→唤回→作答)
+```
+
+其中两条是**真正的全链路证据**（其余是接口级）：
+
+- **`弹窗内作答→user`**：等弹窗页真的把 payload 取回去（`popup::payload_fetch_count()` 涨了，
+  这才说明「窗口建起来 → bridge.js 注入 → 渲染层发起 await invoke → Rust 回包」整条通），
+  再模拟点击，断言 HTTP 侧拿到 `decidedBy=user`。只要 bridge 漏一个方法、命令没注册、
+  弹窗页加载失败，这一项就会挂成 `timeout`。
+- **`收起→唤回→作答`**：收起后断言 `held` 列表有 1 条、**交互还在表里**（没被提前收尾）、
+  主窗提示条那份数据的标签是 `权限 · Bash`；唤回后断言 `held` 清空、交互仍在；
+  最后作答必须拿到 `user`。这一条把「收起不停表」和「唤回不替用户拍板」都钉住了。
+
+### ⚠ 三个唤回入口的覆盖边界（说清楚，别当成"全测过"）
+
+| 入口 | 自动化覆盖 |
+|---|---|
+| ① 主窗提示条 `#heldChip` | ✅ 数据通路（`state:pending-held` 的 payload 内容）已被自检断言 |
+| ② 托盘左键单击 | ❌ 纯 UI 事件接线（`on_tray_event` 的 `Click{Left,Up}` 分支），无注入点，只能真机手点 |
+| ③ 托盘右键「待处理的确认（N）」子菜单 | ❌ 同上（`on_menu_event` 的 `pending:` 前缀分支） |
+
+**②③ 共用 `interaction::reopen_held`**（①也走它），而那个函数本身是自检覆盖到的。
+所以剩下的风险面只有"托盘事件有没有接对分支"这一层 —— 但**不能因此说"已全测"**。
+
+### 新增工具
+
+- **`scripts/smoke-gateway.mjs`** —— 真起应用跑网关自检。与 `smoke-tauri.mjs`
+  **刻意分开、不要合并**：后者设 `POMODORO_SMOKE=1`，而那条路在两个握手点到齐后会
+  **立刻 `app.exit(0)`**（见 `src/smoke.rs` 的 `maybe_finish`），网关自检要跑 ~20 秒
+  会被它腰斩。本脚本设 `POMODORO_GATEWAY_SMOKE=1`，跑完由脚本收尾。
+  它同样带**前置进程表检查**（残留实例的坑见第 10 节），并把
+  `POMODORO_USER_DATA` 指到临时目录，**不会碰到你日常那份 `gateway.json`**。
+
+### ⚠ 踩坑（三个，都值得留着）
+
+**1. `json!` 宏里不能放 Rust 语句。** 写 `json!({ let t = ...; if ... {..} else {..} })`
+看着像块表达式，实际报 `unexpected end of macro invocation`（`json!` 只吃表达式）。
+先算到局部变量再 `json!(title)`。
+
+**2. 自检"永远通过"比"失败"更危险 —— minreq 会强制写自己的 `Host`。**
+第一版 `host-reject(403)` 用例用 minreq 发请求并额外设 `Host: evil.example.com`，
+但 minreq 在请求行后**强制先写一个自己的 `Host`**（`request.rs` 里那句
+`"{} {} HTTP/1.1\r\nHost: {}"`），于是我们设的变成**第二条** Host，
+而校验读的是第一条 —— 结果永远是 200，**用例却"期望 403"所以会失败**；
+更糟的是如果反过来写（期望 200），它就会**静默地永远通过**，
+把一条 DNS-rebinding 安全回归白白放过去。
+修法两处：① `host_ok` 改成检查**全部** Host 头（RFC 7230 只允许一个，
+多于一个本身就可疑），顺带堵住"先塞合法再塞非法"的绕过；② 该用例改走**裸 socket**，
+Host 完全由我们说了算。
+⇒ **教训：涉及安全校验的用例，必须确认"请求真的是我以为的那个形状"。**
+
+**3. 同 id 重弹会误 resolve —— 「唤回」变成「算了」。**
+`popup::show` 会先 `dismiss_previous`：把当前交互窗按 `dismissed` 收尾再关窗。
+而「唤回」恰恰是**用同一个 id 重弹**。正常路径下渲染层收起时会自己关窗，
+所以旧窗已经没了、`dismiss_previous` 直接返回 —— 但只要有一环没关成
+（比如调用方不是渲染层、或窗口销毁失败），就会走进「把用户刚唤回的那条按 dismissed 收尾」，
+用户点了"恢复"却得到"交回终端"。
+修法：`dismiss_previous(app, new_id)` 在 `prev.id == new_id` 时**只关窗、不 resolve**；
+另加 `popup::close_by_id`，让 `reopen_held` 先把同 id 的旧窗确定性关掉再弹
+（否则 `notify-<id>` 这个 label 会判"已存在"而建不出来）。
+⇒ **教训：任何"先清理旧的"逻辑，都要问一句"如果旧的就是我这次要处理的，会怎样"。**
+
+### 有意保留的行为差异（与 Electron 版对比，都记录在案）
+
+| 项 | Electron | Rust | 为什么保留 |
+|---|---|---|---|
+| 弹窗落在哪块屏 | 新窗口默认落点所在屏（Windows 上通常主屏） | **主窗口所在屏**，退化到弹窗窗自己的屏 | 多屏下"用户正在看哪儿就弹哪儿"更符合预期 |
+| Host 校验 | 只看第一个 Host，`/^(127\.0\.0\.1\|localhost)(:\d+)?$/` | 检查**全部** Host，多于一个/任一非回环即拒 | RFC 7230 本来就不允许多个 Host；这是**收紧**，合法客户端行为不变 |
+| `POMODORO_USER_DATA` | `main.js` **不认**（只有 hook 脚本认） | 认（走 `pomodoro_core::user_data_dir()`） | 这是 pomodoro_core 既有的测试用覆盖点，GUI 侧复用它正好让冒烟能隔离数据目录 |
+| 文案截断 | `str.slice(0, n-1)` 按 **UTF-16 码元**，会把 emoji 代理对切一半 | 按 **Unicode 标量** | 这是**修好了**，不是不等价 |
+| `/api/status` 空状态 | `t.roundInCycle \|\| 1` / `t.rounds \|\| 4` | `TimerState::default()` 直接对齐成 1 / 4 | 刚启动、渲染层还没上报那一刻两边必须一致 |
+
+**已知但两边一致（不是差异）**：`ask` 的题目文案是纯空白时**两边都保留** ——
+Electron 的 `capText` 不 trim，`'   '` 在 JS 里是真值。这算个既有怪癖，
+但迁移期**不能只在 Rust 侧"顺手修好"**：两版在同一个 release 里共发，归一化行为必须一致。
+（要修就两版一起修，并各自重跑冒烟。）
+
 

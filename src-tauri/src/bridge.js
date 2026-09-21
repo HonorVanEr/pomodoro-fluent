@@ -104,17 +104,21 @@
   }
 
   // -------------------------------------------------------------------------
-  // M2 占位：通知 / 交互弹窗
+  // 通知 / 交互弹窗
   //
-  // M1 还没有弹窗窗口，所以主界面不会调到这些方法。留成"有名字、会吭声的空函数"
-  // 而不是 undefined，这样即使 notify.js 被提前加载也不会在解析阶段就炸。
+  // 参数形状必须与 `preload.js` 逐项对齐（**签名是渲染层的契约，不能改**）：
+  //   showNotify(payload)           closeNotify(id)
+  //   getNotifyPayload(id) [await]  resizeNotify(width, height)
+  //   respondInteraction(payload)   holdInteraction(id)   reopenInteraction(id)
+  //   respondConfirm(id, action)
+  //
+  // ⚠ 两个易错的形状差异：
+  // 1. `ipcRenderer.send(频道, 裸值)` → Tauri 的 invoke **只吃对象**，所以这里
+  //    一律包成 `{ id }` / `{ payload }` / `{ width, height }`。少包一层就是
+  //    `invalid args`，而且只进 console（send 会吞掉拒绝），界面表现为"点了没反应"。
+  // 2. `getNotifyPayload` 是**会被 await** 的，必须原样返回 invoke 的 Promise；
+  //    不能用 `send`（它是发后不理）。返回 null 由渲染层兜底成"时间到"通知。
   // -------------------------------------------------------------------------
-
-  function notImplemented(name) {
-    return function () {
-      console.warn('[bridge] ' + name + ' 尚未接入（计划 M2）');
-    };
-  }
 
   // -------------------------------------------------------------------------
   // window.pomodoro —— 与 preload.js 逐项对应
@@ -130,19 +134,38 @@
     dockReveal: function () { send('mini_dock_reveal'); },
     dockHide: function () { send('mini_dock_hide_request'); },
 
-    // ---- 通知 / 交互弹窗（M2）----
-    showNotify: notImplemented('showNotify'),
-    closeNotify: notImplemented('closeNotify'),
-    getNotifyPayload: function () { return Promise.resolve(null); },
-    resizeNotify: notImplemented('resizeNotify'),
-    respondInteraction: notImplemented('respondInteraction'),
-    holdInteraction: notImplemented('holdInteraction'),
-    reopenInteraction: notImplemented('reopenInteraction'),
+    // ---- 通知 / 交互弹窗 ----
+    showNotify: function (payload) { send('notify_show', { payload: payload || {} }); },
+    closeNotify: function (id) { send('notify_close', { id: id == null ? '' : String(id) }); },
+    getNotifyPayload: function (id) {
+      // 会被 await：把调用异常也转成 resolved(null)，免得渲染层多一处 catch
+      try {
+        return invoke('notify_payload', { id: String(id == null ? '' : id) })
+          .catch(function (err) {
+            console.warn('[bridge] notify_payload 失败:', err);
+            return null;
+          });
+      } catch (err) {
+        console.warn('[bridge] notify_payload 调用异常:', err);
+        return Promise.resolve(null);
+      }
+    },
+    resizeNotify: function (width, height) {
+      send('notify_resize', { width: Number(width) || 0, height: Number(height) || 0 });
+    },
+    respondInteraction: function (payload) { send('interaction_respond', { payload: payload || {} }); },
+    holdInteraction: function (id) { send('interaction_hold', { id: id == null ? '' : String(id) }); },
+    reopenInteraction: function (id) { send('interaction_reopen', { id: id == null ? '' : String(id) }); },
     // 渲染层启动时会**无条件**调一次 requestHeldPending()（app.js 里紧跟着 onPendingHeld 注册）。
     // 漏掉这个方法就是启动即 TypeError，后面的初始化全被带断 —— Rust 侧回推空列表。
     requestHeldPending: function () { send('pending_get_held'); },
-    respondConfirm: notImplemented('respondConfirm'),
-    // 已收起的确认：M1 没有可收起的东西，Rust 侧回空列表
+    respondConfirm: function (id, action) {
+      send('respond_confirm', {
+        id: String(id == null ? '' : id),
+        action: String(action == null ? '' : action),
+      });
+    },
+    // 已收起的确认（主窗口提示条）：推 + 拉两条路
     onPendingHeld: function (cb) { return subscribe('state:pending-held', cb); },
 
     // ---- Agent 网关（M2 接真货，M1 诚实地回"已停用"）----

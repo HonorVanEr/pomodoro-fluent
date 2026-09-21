@@ -1,16 +1,24 @@
 //! 应用共享状态。
 //!
-//! 分三块，各自一把锁：
+//! 分几块，各自一把锁：
 //! - [`WindowState`] —— 迷你 / 贴边 / 拖拽。改它的人多（命令、托盘、拖拽线程），
 //!   所以逻辑一律写成「取锁 → 算 → 放锁 → 再动窗口」，别在持锁时调窗口 API。
-//! - [`TimerState`] —— 渲染层上报的完整计时快照（托盘倒计时、M2 的网关 `/api/status` 用）。
+//! - [`TimerState`] —— 渲染层上报的完整计时快照（托盘倒计时、网关 `/api/status` 用）。
 //! - [`TraySync`] —— 托盘上一次同步过的值，用来去重（图标染色、菜单重建都有成本）。
+//! - [`Activity`] / [`GatewayRuntime`] —— 本专注期的 agent 活动计数与休息建议冷却。
+//! - [`crate::interaction::Store`] —— 挂起中的交互（含「暂时收起」的那批）。
+//! - [`crate::popup::PopupStore`] —— 弹窗 id → payload，供弹窗页按 id 取回。
+//!
+//! **加锁顺序**：`interactions` → `tray`（`refresh_entry_points` 会先读前者再改后者）。
+//! 反向没有路径，所以不会死锁 —— 但也别去创造一条。
 
 use std::sync::{Mutex, MutexGuard};
 
 use serde::{Deserialize, Serialize};
 
 use crate::geometry::{Edge, Rect};
+use crate::interaction::Store as InteractionStore;
+use crate::popup::PopupStore;
 
 /// `panic = "abort"` 下不会有锁中毒，但 debug/测试环境下有。中毒了也要把值取回来 ——
 /// 为了一个已经 panic 的临界区把整个窗口行为拖死不值当。
@@ -69,14 +77,17 @@ pub struct TimerState {
 
 impl Default for TimerState {
     fn default() -> Self {
+        // `round_in_cycle` / `rounds` 的缺省值必须是 1 / 4：Electron 的 `/api/status`
+        // 用的是 `t.roundInCycle || 1` / `t.rounds || 4`，也就是"缓存为空时"的兜底值。
+        // 写 0 会让**刚启动、渲染层还没上报**那一刻的 `/api/status` 与 Electron 对不上。
         Self {
             phase: "work".to_string(),
             running: false,
             remain_ms: 0.0,
             total_ms: 0.0,
             completed_focus: 0.0,
-            round_in_cycle: 0.0,
-            rounds: 0.0,
+            round_in_cycle: 1.0,
+            rounds: 4.0,
         }
     }
 }
@@ -127,8 +138,36 @@ pub struct TraySync {
     pub phase: Option<String>,
     pub running: Option<bool>,
     pub time_text: Option<String>,
-    // M2 会在这里加 `pending: usize`：待处理的确认条数变化时也要刷新菜单。
-    // M1 没有可收起的东西，先不加（省得留一个永远为 0 的字段）。
+    /// 待处理的确认条数（含正在弹的那个）——变化时要重建菜单 + 改 tooltip。
+    /// 「暂时收起」的入口就在菜单最上面，不跟着变就会留一个点不动的死条目。
+    pub pending: Option<usize>,
+}
+
+/// 本专注期的 agent 活动计数。
+///
+/// 与 `gateway.js` 的 `activity` 同形：阶段切回 `work` 时清零，
+/// 主窗口把它渲染成 `🤖 工具 N · 打断 M`。
+#[derive(Clone, Debug, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct Activity {
+    pub tool_calls: u32,
+    /// 打断 = 提问 + 权限确认次数
+    pub interruptions: u32,
+    pub stops: u32,
+    pub sessions: u32,
+    /// 本期起点（ms 时间戳）。从未进入过专注期时是 null —— 渲染层不读，但契约里得有。
+    pub since: Option<i64>,
+}
+
+/// 网关的纯数据部分（监听句柄在 [`crate::gateway`] 自己的静态量里，
+/// 因为 `tiny_http::Server` 既不 `Debug` 也不 `Default`，塞进来会污染整个 `AppState`）。
+#[derive(Debug, Default)]
+pub struct GatewayRuntime {
+    pub activity: Activity,
+    /// 上一次观察到的定时器阶段 —— 用来识别「切回 work ⇒ 新专注期开始，计数清零」
+    pub prev_phase: Option<String>,
+    /// 上次弹「休息建议」的时间戳（冷却 10 分钟）
+    pub last_break_suggest_at: i64,
 }
 
 /// 全部共享状态。
@@ -137,6 +176,9 @@ pub struct AppState {
     pub win: Mutex<WindowState>,
     pub timer: Mutex<TimerState>,
     pub tray: Mutex<TraySync>,
+    pub gateway: Mutex<GatewayRuntime>,
+    pub interactions: Mutex<InteractionStore>,
+    pub popup: Mutex<PopupStore>,
 }
 
 #[cfg(test)]
