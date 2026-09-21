@@ -29,12 +29,14 @@
 //!   **不 resolve、不停兜底表**
 //! - `interaction_respond` = 用户真的作答了 → `decidedBy='user'`
 
+use std::process::Command;
+
 use serde_json::{json, Value};
 use tauri::{AppHandle, Manager, WebviewWindow};
 
 use crate::about;
 use crate::state::{lock, AppState, TrayPatch};
-use crate::{gateway, interaction, popup, window};
+use crate::{config, gateway, interaction, popup, window};
 
 // ---------------------------------------------------------------------------
 // 窗口控制
@@ -314,21 +316,184 @@ pub fn pending_get_held(app: AppHandle) {
     window::emit(&app, "state:pending-held", interaction::held_chip_items(&app));
 }
 
-/// 一键安装 hook：M3 才接。明确回失败 + 原因，别让用户以为"装上了"。
+/// 可安装的宿主名（与 `crates/hook` 的 `HOOK_AGENT_NAMES` 一致；未知值一律回落 `claude`，
+/// 与 Electron 版 `runHookInstall` 的兜底行为相同）。
+const HOOK_AGENTS: [&str; 9] =
+    ["zcode", "claude", "vscode", "trae", "cursor", "opencode", "codex", "qwen", "all"];
+
+/// 手动等价命令。**必须与渲染层 `buildInstallCommand` 的输出逐字一致** ——
+/// 渲染层走 `hookInvocation(hookPath)`，hookPath 以 `.exe` 结尾时就是 `"<exe>" ...`
+/// （无 `node ` 前缀）；UI 在安装失败时会展示这条让用户复制。
+fn manual_install_command(agent: &str, clean: bool) -> String {
+    format!(
+        "\"{}\" install --agent {}{}",
+        config::hook_path().display(),
+        agent,
+        if clean { " --clean" } else { "" }
+    )
+}
+
+/// 从 CLI stdout 里抠出「已写入 <路径>」/「已安装插件 <路径>」的路径并去重。
+/// 正则语义对齐 Electron 版 `extractWrittenFiles`（`[^\r\n（]+`：遇到全角括号即截断）。
+fn extract_written_files(out: &str) -> Vec<String> {
+    let mut files: Vec<String> = Vec::new();
+    for line in out.lines() {
+        for prefix in ["已写入 ", "已安装插件 "] {
+            let Some(idx) = line.find(prefix) else { continue };
+            let rest = &line[idx + prefix.len()..];
+            let path = rest.split(['（', '\r']).next().unwrap_or("").trim();
+            if !path.is_empty() && !files.iter().any(|f| f == path) {
+                files.push(path.to_string());
+            }
+        }
+    }
+    files
+}
+
+/// stdout 里除「写了哪个文件」之外的说明性文字（沙箱 / 双跑之类的注意事项）。
+/// 对齐 Electron 版 `extractNotes`：丢掉「已写入」/「已安装插件」/「改动需重启」开头的行。
+fn extract_notes(out: &str) -> String {
+    out.lines()
+        .map(str::trim)
+        .filter(|s| {
+            !s.is_empty()
+                && !s.starts_with("已写入 ")
+                && !s.starts_with("已安装插件 ")
+                && !s.starts_with("改动需重启")
+        })
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// 一键安装 hook：调原生 CLI `pomodoro-hook.exe install --agent <x> [--clean]` 写配置。
+///
+/// 返回字段与 Electron 版 `hook:install` **同一形状**（渲染层 `renderInstallResult` 读
+/// `ok` / `agent` / `message` / `notes` / `command` / `log` / `nodeMissing`）：
+///   - `command` — 手动等价命令（失败时给用户复制的退路，也是「复制安装命令」的来源）
+///   - `files`   — 从 stdout 解析出的写入路径（渲染层目前不读，但别让形状漂移）
+///   - `ok`      — 以 **CLI 退出码**为准（未知宿主 / 写盘失败都非零退出）
+///
+/// 与 Electron 版唯一的差别：Rust 版 CLI 是原生 exe，**运行时不依赖 node**，
+/// 所以不再探 node —— `nodeVersion` 恒为空、`nodeMissing` 恒为 `false`。
 #[tauri::command]
 pub fn hook_install(agent: String, clean: bool) -> Value {
     // 参数名不能带下划线前缀（tauri 宏的参数名会转 camelCase，键名对不上）。
-    let _ = clean;
+    let agent = if HOOK_AGENTS.contains(&agent.as_str()) {
+        agent
+    } else {
+        "claude".to_string()
+    };
+    let command = manual_install_command(&agent, clean);
+
+    let Some(exe) = config::ensure_hook_exe() else {
+        return json!({
+            "ok": false, "agent": agent, "command": command, "files": [],
+            "log": "",
+            "message": "无法释放 hook CLI：写用户目录失败（检查磁盘权限/空间）",
+        });
+    };
+
+    let mut args: Vec<String> = vec!["install".into(), "--agent".into(), agent.clone()];
+    if clean {
+        args.push("--clean".into());
+    }
+
+    // `output()` 会等进程退出并收齐 stdout/stderr；hook CLI 的 install 是纯本地写盘，
+    // 不碰网关，所以不需要超时（Electron 版给的 20s 只是保险，这里由 CLI 自己很快返回）。
+    let (exit_code, spawn_err, stdout, stderr) = match Command::new(&exe).args(&args).output() {
+        Ok(o) => (
+            o.status.code().unwrap_or(-1),
+            String::new(),
+            String::from_utf8_lossy(&o.stdout).into_owned(),
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        // 进程压根没起来（exe 被删 / 被占用 / 权限不足）
+        Err(e) => (-1, e.to_string(), String::new(), String::new()),
+    };
+
+    let files = extract_written_files(&stdout);
+    let log = [stdout.trim_end(), stderr.trim_end()]
+        .iter()
+        .filter(|s| !s.is_empty())
+        .cloned()
+        .collect::<Vec<_>>()
+        .join("\n");
+    let ok = exit_code == 0 && spawn_err.is_empty();
+
+    if !ok {
+        let first_err = stderr
+            .lines()
+            .map(str::trim)
+            .find(|l| !l.is_empty())
+            .unwrap_or("");
+        let message = if !spawn_err.is_empty() {
+            format!("安装进程没能启动：{spawn_err}")
+        } else if first_err.is_empty() {
+            format!("安装失败（退出码 {exit_code}）")
+        } else {
+            format!("安装失败（退出码 {exit_code}）：{first_err}")
+        };
+        return json!({
+            "ok": false, "agent": agent, "command": command,
+            "files": files, "log": log, "message": message,
+        });
+    }
+
+    let message = if files.is_empty() {
+        "安装完成（未解析到写入路径，展开日志查看详情）".to_string()
+    } else {
+        format!("已写入 {} 处配置：\n{}", files.len(), files.join("\n"))
+    };
+
     json!({
-        "ok": false,
-        "agent": agent,
-        "message": "Rust 版还没接上「一键安装 hook」（计划在 M3）。\
-                    要现在就配，可以在设置抽屉里点「复制配置」手动粘贴，\
-                    或继续用 Electron 版安装。",
-        // 字段与 Electron 版 `hook:install` 的返回保持一致（渲染层目前没读 files，
-        // 但 preload 的注释里承诺了这四个，别让两边形状漂移）
-        "files": [],
-        "command": "",
-        "log": "",
+        "ok": true, "agent": agent, "command": command,
+        "files": files, "log": log,
+        "notes": extract_notes(&stdout),
+        "nodeVersion": "",
+        "nodeMissing": false,
+        "message": message,
     })
+}
+
+#[cfg(test)]
+mod hook_install_tests {
+    use super::*;
+
+    #[test]
+    fn manual_command_has_no_node_prefix() {
+        // 与渲染层 `hookInvocation` 对齐：.exe 直接执行、不加 `node `
+        let cmd = manual_install_command("zcode", false);
+        assert!(cmd.ends_with("\" install --agent zcode"), "{cmd}");
+        assert!(!cmd.starts_with("node "), "{cmd}");
+        assert!(cmd.contains("pomodoro-hook.exe"), "{cmd}");
+        let with_clean = manual_install_command("codex", true);
+        assert!(with_clean.ends_with("install --agent codex --clean"), "{with_clean}");
+    }
+
+    #[test]
+    fn extracts_written_paths_and_dedups() {
+        let out = "\
+已写入 C:\\Users\\x\\AppData\\Roaming\\番茄钟\\hook\\..\\config.json（原文件备份为 config.json.pomodoro.bak）
+注意事项：Trae 要选「本地自动运行」
+已安装插件 C:\\Users\\x\\.config\\opencode\\plugins\\pomodoro-opencode.ts
+已写入 C:\\a.json（原文件备份为 a.json.pomodoro.bak）";
+        let files = extract_written_files(out);
+        // 全角括号前的路径被切出来，且没有把说明行算进去
+        assert_eq!(files.len(), 3, "{files:?}");
+        assert!(files[0].ends_with("config.json"), "{files:?}");
+        assert!(files[1].ends_with("pomodoro-opencode.ts"), "{files:?}");
+        assert_eq!(files[2], "C:\\a.json");
+    }
+
+    #[test]
+    fn notes_drop_bookkeeping_lines() {
+        let out = "\
+已写入 C:\\a.json（原文件备份为 a.json.pomodoro.bak）
+注意事项：Trae 要选「本地自动运行」
+改动需重启对应 agent 会话后生效。";
+        // 只剩真正的注意事项；「已写入」与「改动需重启」都被滤掉
+        assert_eq!(extract_notes(out), "注意事项：Trae 要选「本地自动运行」");
+    }
 }

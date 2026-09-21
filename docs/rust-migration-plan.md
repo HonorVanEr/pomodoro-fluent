@@ -459,4 +459,133 @@ Electron 的 `capText` 不 trim，`'   '` 在 JS 里是真值。这算个既有�
 但迁移期**不能只在 Rust 侧"顺手修好"**：两版在同一个 release 里共发，归一化行为必须一致。
 （要修就两版一起修，并各自重跑冒烟。）
 
+---
+
+## 12. M3 实测结果（2026-09-21）
+
+目标：**hook CLI Rust 化 + `install` 子命令 + 四处文档同步**。验收：**各宿主真实 CLI 跑通**。
+
+一句话：`bin/pomodoro-hook.js`（1708 行 Node 脚本）整个搬进 `crates/hook`，
+渲染层/宿主配置里写的命令从 `node "<脚本>"` 变成 `"<exe>"`，**Node 从此不是运行时依赖**。
+
+### 做了什么
+
+| 模块 | 行数 | 对应 Electron 侧 | 说明 |
+|---|---|---|---|
+| `crates/hook/src/util.rs` | 276 | JS 工具段 | JS falsy 语义、`pick`/`arr`/`isPlainObject`、**手写 SHA-1** |
+| `crates/hook/src/http.rs` | 446 | `http.request` 调用 | 手写 HTTP/1.1 over `TcpStream`：Content-Length / chunked / `Connection: close` / idle 超时 |
+| `crates/hook/src/cache.rs` | 301 | 本地「始终允许」规则 + 响应缓存 | 缓存键 = SHA-1，**必须与 Node 逐字节一致**（见下） |
+| `crates/hook/src/session.rs` | 437 | 会话上下文累积 | `%TEMP%/pomodoro-hook-cache/session-*.json`，TTL 12h |
+| `crates/hook/src/proto.rs` | 707 | 协议识别 + 归一化 | 8 宿主 / 3 协议族、超时钳制、提问与权限的 shape |
+| `crates/hook/src/ancli.rs` | 340 | `runAncliMode` | Claude / ZCode / VS Code / Trae / Qwen 同族 |
+| `crates/hook/src/cursor.rs` | 363 | `runCursorMode` | camelCase 入参、snake_case 出参 |
+| `crates/hook/src/codex.rs` | 115 | `runCodexNotify` | 老 `config.toml` notify 通道 |
+| `crates/hook/src/opencode.rs` | 413 | 三条 `opencode-*` 子命令 | `{status}` / `{answers}` / `{reject}` + 直连 serverUrl 回传 |
+| `crates/hook/src/install.rs` | 972 | `runInstall` + 8 个 `install<Host>` | 合并写入、`.pomodoro.bak`、`--print` / `--clean` / `--with-notify` |
+| `crates/hook/src/manual.rs` | 177 | `ask` / `permission` / `notify` 调试子命令 | 纯手工触发弹窗 |
+| `crates/hook/src/main.rs` | 392 | CLI 入口 | 子命令分派、stdin 5s 超时、网关不在时静默退出 |
+| `crates/core/src/lib.rs`（改） | 401 | 共享助手 | 网关候选、hook 路径、`env_flag`、`collapse`、`iso8601_ms`、**插件源解析** |
+| `src-tauri/src/commands.rs`（改） | — | `hook:install` | 真调 `pomodoro-hook.exe install …`，返回形状与 Electron 版一致 |
+| `src-tauri/src/config.rs`（改） | — | `installHookScript` / `copyOnce` | 启动时释放 `pomodoro-hook.exe` + OpenCode 插件（内容一致就跳过写盘） |
+
+行数含各模块内联单测；Rust 总计 5340 行 vs JS 1708 行（多出来的主要是测试与显式类型）。
+
+### ⚠ 两个必须记住的实现细节
+
+**1. `serde_json` 的 `preserve_order` 必须在 `crates/hook` 和 `src-tauri` **两处**都开。**
+
+写一次不够 —— 单个 crate 的 feature 满足不了另一个 crate 的编译单元。
+最坑的失败长相：`cargo build --workspace` 下 feature 被合并、行为正确，
+而 `cargo build -p pomodoro-hook` 单独构建时退回 `BTreeMap`，
+写进用户配置的 JSON **键序被重排**（与 Electron 版一字排开的顺序不一致，
+`install --print` 的输出也会凭空 diff）。
+主 `crates/hook/src/main.rs` 的 `json_key_order_is_preserved` 就是钉这个的。
+
+**2. SHA-1 必须手写、且与 Node 的 `crypto.createHash('sha1')` 逐字节一致。**
+
+原因不是"想要个 hash"，而是 **`%TEMP%/pomodoro-hook-cache` 是两版共用的**：
+缓存键 / 会话文件名一旦漂移，同一个会话会被当成两个 → 「同一个提问弹两次窗」。
+黄金测试 `cache_key_matches_node_reference_values` / `session_key_matches_node_reference_values`
+里的 10 组键由 `scripts/keygen-ref.mjs`（真的调 Node `crypto`）生成后抄进代码。
+
+### 验收结果
+
+| 检查项 | 结果 |
+|---|---|
+| 编译 | ✅ `cargo build --workspace` **0 警告** |
+| 单元测试 | ✅ **146 passed / 0 failed**（GUI 76 / core 8 / hook 62；M2 是 72） |
+| **双版本差分自检** | ✅ `scripts/check-hook-parity.sh`：**39 项 / 0 失败**（见下） |
+| hook exe 体积 | 1,548,800 B ≈ **1.48 MB**（debug 构建；release 侧 M0 实测 107 KB） |
+| 网关不在时 | ✅ 三个子命令全是**空 stdout + exit 0**（与 JS 版逐字一致，绝不阻断 agent） |
+| `install` 真写盘 | ✅ 8 宿主 + `all` 全部 exit 0，配置落在隔离 home 的 9 个文件里 |
+| `install --clean` | ✅ 清掉了指向「另一个版本 hook」的旧条目 |
+| **`renderer/` 改动** | ⚠ 只改了 `app.js` 一处（见下），其余与主仓库逐字节一致 |
+
+### 新增工具：`scripts/check-hook-parity.sh`
+
+**这是 M3 最该留下的东西。** 两版共用同一份 renderer、同一份配置格式、同一个会话缓存，
+但 **hook 的协议适配与写出的 JSON 是两套代码** —— 只测一边永远发现不了"两边答得不一样"。
+
+做法：真起 Rust 版 GUI（网关跑起来），对每种输入同时跑
+`node bin/pomodoro-hook.js <args>` 与 `target/debug/pomodoro-hook.exe <args>`，比对 stdout。
+只归一化两处**本来就该不同**的东西：
+
+- `"command"` 里的 hook 路径（Rust 直接跑 exe / JS 用 node 跑脚本）
+- `sessions` 的 `since` 时间格式（见下面的差异表）
+
+覆盖 14 个差分用例 + 12 个宿主协议用例 + 9 次真写盘 + 1 个 `--clean` 用例。
+数据隔离靠 `TEMP` / `USERPROFILE` / `POMODORO_USER_DATA` 三个环境变量
+（**`USERPROFILE` 一定要重定向** —— `install` 会合并 `~/.claude/settings.json` 这些真实配置，
+不隔离就会把用户真配置连同 token 一起打进日志）。
+
+### ⚠ 踩坑（两个）
+
+**1. 插件源文件按 `<exe 同级>/opencode/` 解析，开发期这个目录不存在。**
+
+`install --agent opencode` 要拷 `pomodoro-opencode.ts`。Electron 版用
+`path.join(__dirname, 'opencode', …)` —— `__dirname` 是脚本所在目录，开发期就是仓库的 `bin/`，
+所以**开发期天然能跑**。Rust 版按"插件与 exe 同级"解析（生产布局下两者恰好等价：
+exe 在 `<userData>/hook/`，插件在 `<userData>/hook/opencode/`），但开发期 exe 在
+`target/debug/`，旁边没有 `opencode/` ⇒ 直接报"找不到插件源文件"、`install all` 整个 exit 1。
+
+修法：解析逻辑提到 `pomodoro_core::resolve_plugin_source()`，候选顺序
+① `<exe 同级>/opencode/…`（生产）→ ② 从 exe 目录**往上最多 3 层**找 `bin/opencode/…`（开发）。
+②是**纯相对遍历，不会把开发机绝对路径烧进二进制**；生产环境那三层里没有 `bin/opencode/`，
+自然落空。GUI 释放插件与 CLI 装插件现在共用这一个函数，不会再各写一份写歪。
+⇒ **教训：凡是"和 exe 放一起"的资源，开发期的目录布局一定和生产不一样，早点给它留回退。**
+
+**2. 差分自检里「假差异」比真 bug 更耗时间 —— 三个来源，都踩了。**
+
+- **未清理的宿主 home**：`install --print` 会先读现有配置再合并。隔离目录没清干净时，
+  上一轮写进去的条目会让 JS 侧多合并出一条 → diff 里凭空多出一整块 hook，
+  看着像"Rust 少写了事件"。真因是 `rm -rf` 被本仓库的**批量删除保护**（≥50 项/turn）拦下，
+  目录根本没删掉。修法：每次跑用 `-$$` 后缀的**全新目录**，不删旧目录。
+- **路径分隔符**：`USERPROFILE` 用正斜杠时，Rust 打印 `home\.claude\settings.json`、
+  JS 打印 `C:\...\home\.claude\settings.json`，diff 第一行就炸。隔离变量一律用反斜杠 Windows 形式。
+- **空的比对结果**：`sessions` 在空缓存下两边都返回 `[]` —— 这种"一致"毫无意义。
+  必须先预置两条 `session-*.json`（`at` 用毫秒整数）再比。
+
+⇒ **教训：先确认"差异真的是差异"，再去找 bug。三类噪音各花了一轮才排掉。**
+
+### 有意保留的行为差异（M3 追加一行）
+
+| 项 | Electron | Rust | 为什么保留 |
+|---|---|---|---|
+| `sessions` 的 `since` | `toLocaleString()` → `2026/9/21 14:45:33`（本地时区） | ISO-8601 UTC → `2026-09-21T06:45:33.000Z` | 避开 `chrono` / `tzdata` 依赖；格式与 JS `toISOString()` 对齐，已有单测钉住。只是调试子命令的输出，不影响弹窗与决策 |
+
+另有**纯外观差异**：`status` 里的整数被打印成 `1500000.0`（Rust 侧 `TimerState` 用 `f64`，
+serde 序列化带 `.0`；JS 的 `JSON.stringify` 输出 `1500000`）。数值相等，只是调试命令的文本形式。
+没在 M3 改动网关去"修好"它 —— 迁移期两版同发，**不能只在 Rust 侧顺手改**。
+`check-hook-parity.sh` 把这一项列为"已知差异、不计失败"，就是不让它淹没真回归。
+
+### `renderer/` 的改动（唯一的例外，需要知会）
+
+M1/M2 的硬约束是"`renderer/` 一行不改"。M3 必须破例一处，因为 hook 命令形态变了：
+
+- `renderer/app.js` 新增 `hookInvocation(hookPath)`：`.exe` 结尾 → `"<exe>"`，否则 `node "<js>"`；
+  `buildHookSnippet` / `buildInstallCommand` 改用它。
+
+**这一改动对 Electron 版是零行为变化**（Electron 传的 hookPath 是 `.js`，输出与旧版逐字节一致），
+所以它是"两版共用的同一份 renderer"里唯一该有的分叉点。
+⇒ 合到 `main` 时这一处要一起带过去（`docs/dual-release.md` 第 6 节的六处同步之一）。
 

@@ -14,7 +14,11 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
+# ⚠ preserve_order 必须在**两个** crate 里都显式打开：workspace 一起构建时
+# feature 会合并，只在一处开会让「单独 build -p」和「build --workspace」产出的
+# JSON 键序不同。开着的收益是 config.json 的键序和 Electron 版一致（读进来什么
+# 顺序就写回去什么顺序），而不是被 BTreeMap 按字母重排。
+serde_json = { version = "1", features = ["preserve_order"] }
 pomodoro-core = { path = "../crates/core" }
 # 单实例锁：第二次启动会直接退出，并把已有实例的窗口唤到前台
 # （等价 Electron 的 requestSingleInstanceLock + second-instance）。

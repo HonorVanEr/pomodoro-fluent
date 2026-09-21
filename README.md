@@ -79,7 +79,7 @@ npm start
 
 - **提问弹窗（可直接作答）**：agent 的 `AskUserQuestion` 会弹窗列出选项，单选/多选/自定义回答都行，答案直接回传给 agent
 - **权限弹窗（可直接审批）**：「允许一次 / 始终允许 / 拒绝」，可填备注作为拒绝理由；「始终允许」写进宿主权限规则，宿主不支持规则回写时记进番茄钟本地缓存（**仅 Claude Code / ZCode / Qwen Code / Cursor / OpenCode / Codex 有这条通道**；VS Code 与 Trae 没有权限事件，按各自的审批设置走）
-- **知道是哪个任务在动**：弹窗带上下文——宿主与子 agent 名称、当前任务提示词、工具与命令、项目名、会话尾号（`pomodoro-hook.js sessions` 可查看跟踪明细）
+- **知道是哪个任务在动**：弹窗带上下文——宿主与子 agent 名称、当前任务提示词、工具与命令、项目名、会话尾号（hook CLI 的 `sessions` 子命令可查看跟踪明细）
 - **通知弹窗**：任务完成、异常等纯通知，看完即走，同样带上下文
 - **专注期活动统计**：主窗口显示 `🤖 工具 N · 打断 M`，专注结束弹窗汇总本期 agent 产出
 - **休息建议**：agent 跑完任务而你仍在专注时段，弹窗建议趁机休息，一键跳到休息
@@ -103,11 +103,20 @@ npm start
 
 **一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点 **一键安装**，配置直接写好（原文件自动备份），面板上会告诉你写了哪些文件、有哪些注意事项；**装失败也不用慌**，面板会给出一模一样的命令行让你复制到终端执行。
 
-也可以走命令行（「复制安装命令」按钮复制的是这条）：
+也可以走命令行（「复制安装命令」按钮复制的是这条；应用会**按当前版本**自动生成正确写法）：
 
 ```bash
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all   # 或 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
+# Rust / Tauri 版（原生 CLI，无需 node）
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent all
+
+# Electron 版（Node 脚本，需要本机有 node）
+node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
+# 宿主可选 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
 ```
+
+> **两份安装包、两套 hook CLI**：Rust 版释放 `pomodoro-hook.exe`（1 MB 级安装包，不依赖 node），
+> Electron 版释放 `pomodoro-hook.js`。两版身份与数据目录相同（**不要并排装**），hook 也只该让一个
+> 版本管。命令写法与手动配置片段的差异见 [Agent 集成指南](docs/agent-hooks.md)。
 
 也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，提问挂 `PreToolUse`；VS Code **会忽略 matcher**，非提问工具的调用在 CLI 里静默上报）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，提问同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，用它收窄到 `AskUserQuestion`）；**Cursor** 在 `~/.cursor/hooks.json`（camelCase 事件，`beforeShellExecution` / `beforeMCPExecution` / `preToolUse` 三条仍做审批）；**Qwen Code** 在 `~/.qwen/settings.json`（与 Claude Code 同形，提问 + `PermissionRequest` 都有）；OpenCode 走插件；**Codex** 在 `~/.codex/hooks.json`（12 个事件，审批走它自己的 `PermissionRequest` —— 该事件**只在 Codex 本来就要问用户时触发**）。
 
@@ -132,7 +141,7 @@ OpenCode 插件接入、远程允许/拒绝、HTTP API 全量说明见 **[Agent 
 ## 🛠️ 技术实现
 
 - **主进程**（`main.js`）：窗口管理、系统托盘、通知弹窗、单实例锁
-- **Agent 网关**（`gateway.js`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；ask / permission / notification 三类交互经长轮询回传决策；hook CLI（`bin/pomodoro-hook.js`）零依赖，应用未运行时静默退出，绝不阻断 agent
+- **Agent 网关**（Electron 版 `gateway.js` / Rust 版 `src-tauri/src/gateway.rs`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；ask / permission / notification 三类交互经长轮询回传决策；hook CLI（Electron 版 `bin/pomodoro-hook.js` / Rust 版 `crates/hook`）零依赖，应用未运行时静默退出，绝不阻断 agent
 - **一键安装**（`main.js`）：主进程用 Electron 自带的 Node（`ELECTRON_RUN_AS_NODE=1`）跑 hook CLI 写配置，所以本机没装 node 也能装；成败按 CLI 退出码判断（未知宿主 / 写盘失败都非零退出），失败时把等价命令行交还给界面供复制
 - **迷你悬浮 & 贴边隐藏**：手动光标跟随拖拽（原生 drag 区会吞掉 `:hover`）；贴边收起时窗口带透明留白绕开 Windows 约 32×39 的最小窗口限制，仅靠屏幕边缘的 6px 绘制进度条，透明区域完全穿透（可见性与点击均不受影响）
 - **阶段结束提醒**：弹窗页按 payload 的 `timeoutMs` 决定停留时长（纯通知默认 5s，阶段结束 20s），鼠标悬停暂停倒计时与进度条；弹窗按钮动作回到主进程后转成渲染层命令（`start-next` → 直接开跑下一阶段），网关侧仍是长轮询等决策、与定时器提醒互不干扰
@@ -173,26 +182,32 @@ npm run pack
 ## 📁 项目结构
 
 ```
-pomodoro-fluent/
-├── main.js              # Electron 主进程
+pomodoro-fluent/                 # 一个仓库、两套实现（同号发布，见 docs/dual-release.md）
+├── renderer/            # 界面（两版共用，逐字节一致）
+│   ├── index.html       # 主窗口
+│   ├── styles.css       # 主界面样式（Win11 Fluent）
+│   ├── app.js           # 番茄钟逻辑
+│   ├── notify.html      # 通知弹窗（支持 agent 确认模式）
+│   ├── notify.css       # 弹窗样式
+│   └── notify.js        # 弹窗逻辑
+│
+├── ── Electron 版 ──
+├── main.js              # 主进程
 ├── preload.js           # 安全桥接层
 ├── gateway.js           # Agent 网关（本地 HTTP，hooks 对接）
-├── bin/
-│   └── pomodoro-hook.js # Agent hook CLI（零依赖，供 8 家宿主 hook + curl 调用）
-├── package.json
+├── bin/pomodoro-hook.js # Agent hook CLI（Node 脚本，供 8 家宿主 hook + curl 调用）
 ├── apply-acrylic.ps1    # Acrylic 毛玻璃（DWM API，PowerShell）
+│
+├── ── Rust / Tauri 版 ──
+├── src-tauri/           # GUI（番茄钟.exe）+ Tauri 配置 + Rust 网关
+├── crates/
+│   ├── core/            # 两个 exe 共用（路径 / 协议助手）
+│   └── hook/            # Agent hook CLI（pomodoro-hook.exe）
+│
+├── package.json         # 版本号唯一事实源（两版共用，打包时同步进 tauri.conf.json）
 ├── assets/              # 图标资源（自动生成）
-│   ├── icon.png         # 应用/窗口图标
-│   └── tray.png         # 托盘图标模板
-├── scripts/             # 打包辅助脚本（afterPack）
-├── docs/                # 截图与文档（agent-hooks / openviking-memory-prompt）
-└── renderer/            # 界面
-    ├── index.html       # 主窗口
-    ├── styles.css       # 主界面样式（Win11 Fluent）
-    ├── app.js           # 番茄钟逻辑
-    ├── notify.html      # 通知弹窗（支持 agent 确认模式）
-    ├── notify.css       # 弹窗样式
-    └── notify.js        # 弹窗逻辑
+├── scripts/             # 打包 / 冒烟脚本
+└── docs/                # 文档（agent-hooks / dual-release / rust-migration-plan …）
 ```
 
 ## 📄 许可证

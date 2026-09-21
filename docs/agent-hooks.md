@@ -36,7 +36,22 @@ Codex hooks ───────────┘
 > 命令执行、删改文件等操作**完全按宿主自己的审批设置走**，番茄钟不介入。
 > 想调这两家的放行策略，请改宿主自己的设置（VS Code 的 `chat.tools.*`、Trae 的 `AI.toolcall.v2.*`）。
 
-> 任何「Claude Code 兼容格式」的宿主（iFlow、Trae、CodeBuddy、Copilot CLI 等）都能直接用，把 `pomodoro-hook.js` 当成 hook command 填进去即可。
+> 任何「Claude Code 兼容格式」的宿主（iFlow、Trae、CodeBuddy、Copilot CLI 等）都能直接用，把 hook CLI 当成 hook command 填进去即可。
+
+### hook CLI 有两种形态（本文命令写法以此为准）
+
+同一份文档覆盖两个版本，**命令前缀不同**：
+
+| 版本 | 安装包 | hook CLI 命令 |
+|---|---|---|
+| **Tauri 版**（推荐，体积 ~1 MB，无需 node） | `番茄钟_..._x64-setup.exe` | `"%APPDATA%\番茄钟\hook\pomodoro-hook.exe"` |
+| **Electron 版** | `番茄钟 Setup ...exe` | `node "%APPDATA%\番茄钟\hook\pomodoro-hook.js"`（需要本机有 node） |
+
+**下文所有配置片段与命令默认按 Tauri 版（`.exe`）书写**。如果你用的是 Electron 版，
+把出现 `"%APPDATA%\番茄钟\hook\pomodoro-hook.exe"` 的地方一律换成
+`node "%APPDATA%\番茄钟\hook\pomodoro-hook.js"` 即可，其余一字不差。
+
+> 应用里的「复制配置」「复制安装命令」会**自动**按当前版本生成正确写法，不用自己改。
 
 ## 三种弹窗
 
@@ -116,7 +131,7 @@ Codex hooks ───────────┘
 - 想核对 hook 到底跟踪到了什么，跑：
 
   ```bash
-  node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
+  "%APPDATA%\番茄钟\hook\pomodoro-hook.exe" sessions
   # [{"session":"a1b2c3","source":"zcode","project":"pomodoro-fluent",
   #   "task":"把 agent 网关的弹窗改成可交互的","lastTool":"Bash",
   #   "lastToolDetail":"npm test","agentType":""}]
@@ -140,11 +155,12 @@ Codex hooks ───────────┘
 默认开启，状态与端口持久化在 `userData/config.json`。停用后本地端口立即释放，
 hook 侧的上报会静默跳过（不会阻断 agent 工作）；想恢复弹窗再点一次即可，无需重启应用。
 
-番茄钟启动时会自动把脚本安装到固定路径（与仓库/安装位置解耦）：
+番茄钟启动时会自动把 hook CLI 释放到固定路径（与仓库/安装位置解耦）：
 
 ```
-%APPDATA%\番茄钟\hook\pomodoro-hook.js
-%APPDATA%\番茄钟\hook\opencode\pomodoro-opencode.ts
+%APPDATA%\番茄钟\hook\pomodoro-hook.exe               # Tauri 版（原生可执行文件，无需 node）
+%APPDATA%\番茄钟\hook\pomodoro-hook.js                # Electron 版（Node 脚本）
+%APPDATA%\番茄钟\hook\opencode\pomodoro-opencode.ts   # OpenCode 插件（两版共用）
 ```
 
 > 路径跟的是应用的 userData（打包版是 `%APPDATA%\番茄钟`）；找不到时会回退读
@@ -162,26 +178,28 @@ hook 侧的上报会静默跳过（不会阻断 agent 工作）；想恢复弹�
 - 安装成功：列出写入的配置文件 + 注意事项（比如 Trae 要选「本地自动运行」）→ 重启对应 agent 生效；
 - 安装失败：面板直接给出**原因**（写盘失败 / 权限 / 路径被占用）和**等价的命令行**，
   点「复制命令」就能自己到终端执行，不用回来找；
-- 装完但本机没有 `node`：会明确警告 —— 配置装上了没错，但 hook 是运行时用
+- **Tauri 版**：hook CLI 是原生 exe，不依赖 node，配置装好即可用；
+- **Electron 版**：装完但本机没有 `node` 会明确警告 —— 配置装上了没错，但 hook 是运行时用
   `node "<脚本>"` 拉起的，缺了它 agent 那边不会弹窗。
 
-实现上，主进程用 **Electron 自带的 Node**（`ELECTRON_RUN_AS_NODE=1`）执行 hook CLI，
-所以本机没装 node 也能把配置写进去；配置里写的仍是 `node "..."`，与手动安装完全一致。
+实现上，两版都由主进程直接调用 hook CLI（Tauri 跑 `pomodoro-hook.exe`；Electron 用
+**Electron 自带的 Node**（`ELECTRON_RUN_AS_NODE=1`）跑 `pomodoro-hook.js`），所以本机没装
+node 也能把配置写进去；写进配置的命令与手动安装完全一致（Tauri 写 `.exe`、Electron 写 `node "..."`）。
 
 **方式二：复制命令自己执行**
 
 点「复制安装命令」粘到终端。等价命令：
 
 ```bash
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent zcode
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent claude
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent vscode
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent trae
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent cursor
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent opencode
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent codex
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent qwen
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent zcode
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent claude
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent vscode
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent trae
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent cursor
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent opencode
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent codex
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent qwen
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent all
 ```
 
 - 会**自动合并**进对应配置文件，原文件备份为 `*.pomodoro.bak`；
@@ -203,19 +221,19 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
     "timeoutMs": 600000,
     "events": {
       "PermissionRequest": [
-        { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode", "timeoutMs": 600000 }] }
+        { "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source zcode", "timeoutMs": 600000 }] }
       ],
       "PreToolUse": [
-        { "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode", "timeoutMs": 600000 }] }
+        { "matcher": "AskUserQuestion", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source zcode", "timeoutMs": 600000 }] }
       ],
       "Stop": [
-        { "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode" }] }
+        { "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source zcode" }] }
       ],
       "PostToolUse": [
-        { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode" }] }
+        { "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source zcode" }] }
       ],
       "PostToolUseFailure": [
-        { "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source zcode" }] }
+        { "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source zcode" }] }
       ]
     }
   }
@@ -246,13 +264,13 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 ```json
 {
   "hooks": {
-    "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
-    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
-    "PreToolUse": [{ "matcher": "AskUserQuestion|askQuestions|askQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code", "timeout": 4200 }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
-    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }],
-    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source claude-code" }] }]
+    "Notification": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code" }] }],
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code", "timeout": 4200 }] }],
+    "PreToolUse": [{ "matcher": "AskUserQuestion|askQuestions|askQuestion", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code", "timeout": 4200 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source claude-code" }] }]
   }
 }
 ```
@@ -338,14 +356,14 @@ hook 是否执行、以及 `Load Hooks` 日志里各 hook 是从哪个文件加�
 {
   "version": 1,
   "hooks": {
-    "PreToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 4200 }],
-    "PostToolUse": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
-    "SessionStart": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
-    "UserPromptSubmit": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
-    "SubagentStart": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
-    "SubagentStop": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
-    "PreCompact": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }],
-    "Stop": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source vscode", "timeout": 30 }]
+    "PreToolUse": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 4200 }],
+    "PostToolUse": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }],
+    "SessionStart": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }],
+    "UserPromptSubmit": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }],
+    "SubagentStart": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }],
+    "SubagentStop": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }],
+    "PreCompact": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }],
+    "Stop": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source vscode", "timeout": 30 }]
   }
 }
 ```
@@ -393,13 +411,13 @@ Trae 里的命令执行、删改文件按 Trae 自己的设置走（`AI.toolcall
   "hooks": {
     "PreToolUse": [{
       "matcher": "AskUserQuestion",
-      "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 4200 }]
+      "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source trae", "timeout": 4200 }]
     }],
-    "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
-    "SessionStart": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }],
-    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source trae", "timeout": 30 }] }]
+    "Notification": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source trae", "timeout": 30 }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source trae", "timeout": 30 }] }],
+    "SessionStart": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source trae", "timeout": 30 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source trae", "timeout": 30 }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source trae", "timeout": 30 }] }]
   }
 }
 ```
@@ -446,14 +464,14 @@ Trae 里的命令执行、删改文件按 Trae 自己的设置走（`AI.toolcall
 {
   "version": 1,
   "hooks": {
-    "beforeShellExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 4200 }],
-    "preToolUse": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 4200 }],
-    "beforeMCPExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor", "timeout": 4200 }],
-    "beforeSubmitPrompt": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
-    "afterFileEdit": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
-    "afterShellExecution": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
-    "afterAgentResponse": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }],
-    "stop": [{ "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source cursor" }]
+    "beforeShellExecution": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor", "timeout": 4200 }],
+    "preToolUse": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor", "timeout": 4200 }],
+    "beforeMCPExecution": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor", "timeout": 4200 }],
+    "beforeSubmitPrompt": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor" }],
+    "afterFileEdit": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor" }],
+    "afterShellExecution": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor" }],
+    "afterAgentResponse": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor" }],
+    "stop": [{ "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source cursor" }]
   }
 }
 ```
@@ -475,11 +493,11 @@ PreCompact  PostCompact
 {
   "hooks": {
     "PermissionRequest": [
-      { "hooks": [{ "type": "command", "command": "node \"...\\pomodoro-hook.js\" --source codex", "timeout": 4200 }] }
+      { "hooks": [{ "type": "command", "command": "\"...\\pomodoro-hook.exe\" --source codex", "timeout": 4200 }] }
     ],
     "PreToolUse": [
       { "matcher": "Bash|apply_patch|Edit|Write|mcp__.*",
-        "hooks": [{ "type": "command", "command": "node \"...\\pomodoro-hook.js\" --source codex", "timeout": 30 }] }
+        "hooks": [{ "type": "command", "command": "\"...\\pomodoro-hook.exe\" --source codex", "timeout": 30 }] }
     ]
   }
 }
@@ -546,13 +564,13 @@ Qwen Code 是 Claude Code 的兼容分支，hook 配置在 `~/.qwen/settings.jso
 ```json
 {
   "hooks": {
-    "Notification": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
-    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen", "timeout": 4200 }] }],
-    "PreToolUse": [{ "matcher": "AskUserQuestion|askQuestions|askQuestion", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen", "timeout": 4200 }] }],
-    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
-    "Stop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
-    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }],
-    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "node \"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.js\" --source qwen" }] }]
+    "Notification": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen" }] }],
+    "PermissionRequest": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen", "timeout": 4200 }] }],
+    "PreToolUse": [{ "matcher": "AskUserQuestion|askQuestions|askQuestion", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen", "timeout": 4200 }] }],
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen" }] }],
+    "SubagentStop": [{ "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen" }] }],
+    "PostToolUse": [{ "matcher": "*", "hooks": [{ "type": "command", "command": "\"%APPDATA%\\番茄钟\\hook\\pomodoro-hook.exe\" --source qwen" }] }]
   }
 }
 ```
@@ -575,7 +593,7 @@ OpenCode 走插件。执行 `install --agent opencode` 会：
 | `question.asked` | 调番茄钟弹提问窗 → `POST /question/{id}/reply` 回传 `answers`（string[][]）；取消则 reject |
 | `session.idle` / `session.error` | 上报 `stop` / `notification` |
 
-插件本身不含业务逻辑，全部转发给 `pomodoro-hook.js`：
+插件本身不含业务逻辑，全部转发给 hook CLI（两版都优先找 `.exe`，没有再退回 `node "...pomodoro-hook.js"`）：
 
 ```
 opencode-permission   # stdin {permission} → stdout {status}
@@ -638,11 +656,11 @@ curl -X POST -H "Authorization: Bearer $TOKEN" -H "Content-Type: application/jso
 CLI 直连模式（等价于上面的通用能力）：
 
 ```bash
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" ask --question "继续吗？" --option 继续 --option 停下 --task "重构缓存层" --agent zcode
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" permission --tool Bash --detail "npm test" --task "修登录超时" --agent claude-code
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" notify --title "构建完成" --message "可以回来验收了"
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" status
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" ask --question "继续吗？" --option 继续 --option 停下 --task "重构缓存层" --agent zcode
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" permission --tool Bash --detail "npm test" --task "修登录超时" --agent claude-code
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" notify --title "构建完成" --message "可以回来验收了"
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" status
+"%APPDATA%\番茄钟\hook\pomodoro-hook.exe" sessions
 ```
 
 （`ask` / `permission` 加 `--task` `--agent` `--agent-type` `--project` 可以模拟上下文，方便调弹窗样式。）
@@ -694,13 +712,19 @@ node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" sessions
 ## 自测
 
 ```bash
-# 纯 Node 跑通全链路：弹窗模拟 + ZCode/Claude Code 协议 + OpenCode 子命令
+# 两版共用：纯 Node 跑通全链路（弹窗模拟 + ZCode/Claude Code 协议 + OpenCode 子命令）
 node scripts/smoke-interaction.js
 
-# 应用内自检（需 Electron）
+# Tauri 版：真起应用，让 Rust 自己打一遍 HTTP 接口（端点 / 协议 / 超时兜底）
+node scripts/smoke-gateway.mjs
+
+# 双版本差分（Git Bash）：同一输入喂给 JS hook 与 Rust hook，stdout 必须一致
+bash scripts/check-hook-parity.sh
+
+# Electron 版：应用内自检
 POMODORO_GATEWAY_SMOKE=1 npm start
 
-# 依次弹一遍 ask / permission / notification，并把渲染层实测尺寸打到日志
+# 依次弹一遍 ask / permission / notification，并把渲染层实测尺寸打到日志（Electron）
 POMODORO_POPUP_DEMO=1 npm start
 ```
 

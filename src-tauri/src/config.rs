@@ -1,5 +1,5 @@
 //! 用户配置与固定路径 —— 对应 Electron 版 `main.js` 的 `configPath` / `loadConfig` /
-//! `saveConfig` / `hookScriptPath` / `opencodePluginPath`。
+//! `saveConfig` / `hookScriptPath` / `installHookScript` / `opencodePluginPath`。
 //!
 //! ⚠ **目录必须和 Electron 版是同一个**：`%APPDATA%/pomodoro-fluent`。
 //! 实测本机只有这一个目录（没有 `%APPDATA%/番茄钟`），因为 Electron 的
@@ -67,20 +67,66 @@ pub fn gateway_enabled() -> bool {
         .unwrap_or(true)
 }
 
-/// hook 脚本落地的固定路径：`<userData>/hook/pomodoro-hook.js`。
+/// hook CLI 落地路径：`<userData>/hook/pomodoro-hook.exe`。
 ///
-/// 渲染层的「复制配置」片段用得上它。M2 里这个文件还由 Electron 版/用户自己放；
-/// M3 把 hook CLI Rust 化后，变成 Rust 版自己释放（到时只改这一处）。
-pub fn hook_script_path() -> PathBuf {
-    pomodoro_core::user_data_dir().join("hook").join("pomodoro-hook.js")
+/// ⚠ 路径本身的事实源在 [`pomodoro_core::hook_exe_path`] —— 因为 **hook CLI 自己
+/// 也要拼这个路径去装配置**，两处各写一遍迟早写歪（用户装好的 hook 会指向空气）。
+///
+/// 渲染层的「复制配置」片段用得上它。值末尾是 `.exe` 而不是 `.js`：渲染层的
+/// `buildHookSnippet` / `buildInstallCommand` 会据此决定加不加 `node ` 前缀。
+pub fn hook_path() -> std::path::PathBuf {
+    pomodoro_core::hook_exe_path()
 }
 
 /// OpenCode 插件路径（`install --agent opencode` 要用）
-pub fn opencode_plugin_path() -> PathBuf {
-    pomodoro_core::user_data_dir()
-        .join("hook")
-        .join("opencode")
-        .join("pomodoro-opencode.ts")
+pub fn opencode_plugin_path() -> std::path::PathBuf {
+    pomodoro_core::opencode_plugin_path()
+}
+
+/// 把随包分发的 `pomodoro-hook.exe` / OpenCode 插件释放到 `<userData>/hook/`。
+///
+/// 对应 Electron 版 `main.js` 的 `installHookScript()` + `copyOnce()`：
+/// **内容一致就跳过写盘**，所以每次启动调用也不会有额外 IO。
+///
+/// 为什么非要复制一份、不直接用安装目录里那个：
+/// ① hook 配置里写的是绝对路径，安装目录会随重装/换版本变化；
+/// ② 安装到 `Program Files` 时那个目录对普通用户只读，hook 自己没法在旁边放东西。
+///
+/// 返回 hook exe 的落地路径；释放失败回 `None`（**不致命** —— 已装好的旧 hook
+/// 还能继续用，只是升级不了）。
+pub fn ensure_hook_exe() -> Option<std::path::PathBuf> {
+    let src = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|d| d.join(pomodoro_core::HOOK_EXE_NAME)));
+    let dst = hook_path();
+
+    let ok = match src {
+        Some(src) if src.exists() => copy_if_changed(&src, &dst).is_ok(),
+        // 开发期可能只 build 了 GUI：同目录没有 hook exe 就当"没有可释放的"
+        _ => false,
+    };
+    if !ok {
+        return if dst.exists() { Some(dst) } else { None };
+    }
+    // OpenCode 插件一起带上（`install --agent opencode` 会拷它）
+    // 源文件解析与 hook CLI 共用 `pomodoro_core::resolve_plugin_source()` —— 生产布局是
+    // 「插件与 exe 同级」，开发期回退到 `<仓库>/bin/opencode/`。
+    if let Some(plugin_src) = pomodoro_core::resolve_plugin_source() {
+        let _ = copy_if_changed(&plugin_src, &opencode_plugin_path());
+    }
+    Some(dst)
+}
+
+/// 内容一致就跳过 —— 与 Electron 的 `copyOnce` 语义相同（`Buffer.equals`）。
+fn copy_if_changed(src: &std::path::Path, dst: &std::path::Path) -> std::io::Result<()> {
+    let buf = std::fs::read(src)?;
+    if let Some(dir) = dst.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    if std::fs::read(dst).map(|old| old == buf).unwrap_or(false) {
+        return Ok(());
+    }
+    std::fs::write(dst, buf)
 }
 
 #[cfg(test)]
@@ -92,10 +138,34 @@ mod tests {
         // 三个路径必须都在同一棵树下，否则「换机器后配置找不到」会变成静默 bug
         let root = pomodoro_core::user_data_dir();
         assert_eq!(config_path().parent().unwrap(), root);
-        assert!(hook_script_path().starts_with(&root));
+        assert!(hook_path().starts_with(&root));
         assert!(opencode_plugin_path().starts_with(&root));
-        assert!(hook_script_path().ends_with("hook/pomodoro-hook.js"));
+        // 末尾必须是 .exe：渲染层靠这个后缀决定要不要加 `node ` 前缀
+        assert_eq!(hook_path().extension().unwrap(), "exe");
+        assert!(hook_path().ends_with("hook/pomodoro-hook.exe"));
         assert!(opencode_plugin_path().ends_with("hook/opencode/pomodoro-opencode.ts"));
+    }
+
+    #[test]
+    fn copy_if_changed_skips_identical_content() {
+        let dir = std::env::temp_dir().join("pomodoro-config-test-copy");
+        let _ = std::fs::remove_dir_all(&dir);
+        let src = dir.join("src.exe");
+        let dst = dir.join("nested").join("dst.exe");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(&src, b"v1").unwrap();
+
+        copy_if_changed(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"v1");
+        // 内容相同时不该重写（mtime 不变）——「一致就跳过」是 copyOnce 的核心
+        let mtime = std::fs::metadata(&dst).unwrap().modified().unwrap();
+        copy_if_changed(&src, &dst).unwrap();
+        assert_eq!(std::fs::metadata(&dst).unwrap().modified().unwrap(), mtime);
+
+        std::fs::write(&src, b"v2 longer").unwrap();
+        copy_if_changed(&src, &dst).unwrap();
+        assert_eq!(std::fs::read(&dst).unwrap(), b"v2 longer");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

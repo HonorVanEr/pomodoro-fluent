@@ -96,6 +96,18 @@ fn main() {
             smoke::step("主窗口已建");
             tray::create(&handle)?;
             smoke::step("托盘已建");
+            // 释放 hook CLI（`<userData>/hook/pomodoro-hook.exe` + OpenCode 插件）——
+            // 对应 Electron 版 app ready 里的 `installHookScript()`，内容一致就跳过写盘。
+            // 放在网关启动前：hook 配置里引用的是这个路径，先落地再对外服务。
+            match config::ensure_hook_exe() {
+                Some(p) => {
+                    eprintln!("[hook] 已释放 hook CLI: {}", p.display());
+                    smoke::step("hook CLI 已释放");
+                }
+                // 不致命：开发期可能只 build 了 GUI（同目录没有 pomodoro-hook.exe），
+                // 已装好的旧 hook 还能继续用，只是升级不了。
+                None => eprintln!("[hook] 未释放 hook CLI（同目录没有 pomodoro-hook.exe？）"),
+            }
             // 网关：只监听 127.0.0.1（入站服务，不是"主动发请求"），
             // 是否启用由 config.json 的 gatewayEnabled 决定（缺省 true，与 Electron 版一致）。
             if config::gateway_enabled() {

@@ -137,7 +137,7 @@ gh release create v1.1.7 --target <mergeCommit> --title v1.1.7 release/*
 两套实现并存后，宿主适配逻辑有了两份，漏同步的代价翻倍：
 
 1. Electron 版 `bin/pomodoro-hook.js`
-2. Rust 版 `crates/hook`（M3 才动）
+2. Rust 版 `crates/hook`（**M3 起已就位**）
 3. `main.js` 里写出的 hook 配置
 4. `renderer/app.js` 的 `buildHookSnippet`（**两版共用这一份**）
 5. `docs/agent-hooks.md`
@@ -146,16 +146,24 @@ gh release create v1.1.7 --target <mergeCommit> --title v1.1.7 release/*
 `renderer/` 是两版共用的，改 UI 两边同时生效；但 **hook 的协议适配和写入的 JSON 是两套代码**，
 是这套双版本方案里最容易出错的地方。
 
+改完别只跑一边的测试 —— 跑 **`bash scripts/check-hook-parity.sh`**（M3 新增）：
+它真起 Rust 版 GUI，把同一批输入同时喂给 `bin/pomodoro-hook.js` 与 `pomodoro-hook.exe`，
+逐字比对 stdout（只归一化「本来就该不同」的 hook 路径与 `since` 时间格式）。
+宿主适配漏同步、事件名/matcher/timeout 写歪，都会在这里现形。
+
 ---
 
-## 7. 当前状态（2026-09-20）
+## 7. 当前状态（2026-09-21）
 
 | | 状态 |
 |---|---|
-| Electron 版 | 完整可用，v1.1.6；**本次双版本改造中一行未改**（检查更新逻辑与 `main` 完全一致） |
-| Rust 版 | **M0 骨架**：空窗 + 托盘 + 能打出 1.04 MB 安装包；功能未迁移 |
+| Electron 版 | 完整可用，v1.1.6；双版本改造中**功能未改**（检查更新逻辑与 `main` 完全一致）。唯一例外：`renderer/app.js` 的 hook 命令拼装新增了对 `.exe` 的分支（对 Electron **零行为变化**） |
+| Rust 版 | **M3 完成**：主窗 UI + 计时 + 迷你/贴边 + 托盘 + 网关 + 弹窗 + held 状态机 + **hook CLI 与 `install` 子命令全部 Rust 化** |
+| Node 依赖 | Electron 版需要；**Rust 版已完全不依赖**（hook 是原生 exe，打包也不发 Node） |
+| 尚未迁移 | `scripts/smoke-interaction.js` → Rust 集成测试（M4）；打包与发版（M5） |
 | 版本号 | 统一：`src-tauri/tauri.conf.json` 已同步为 `package.json` 的 `1.1.6` |
 | 打包脚本 | ✅ `scripts/pack-release.mjs`（`pack:all` / `pack:rust`） |
 | 发布文档 | ✅ 本文 |
 
-Rust 版的功能对齐进度见 `docs/rust-migration-plan.md` 的 M0–M5 里程碑。
+Rust 版的功能对齐进度见 `docs/rust-migration-plan.md` 的 M0–M5 里程碑，
+第 9–12 节是各阶段的实测结果与踩坑记录。
