@@ -567,6 +567,22 @@ exe 在 `<userData>/hook/`，插件在 `<userData>/hook/opencode/`），但开�
 
 ⇒ **教训：先确认"差异真的是差异"，再去找 bug。三类噪音各花了一轮才排掉。**
 
+**3. M3 给 GUI 加了"启动时写 userData"，把 `smoke-tauri.mjs` 的隔离漏洞暴露了。**
+
+`ensure_hook_exe()` 会在**每次启动**把 `pomodoro-hook.exe` + OpenCode 插件释放进
+`<userData>/hook/`。而 `smoke-tauri.mjs` 只隔离了 `WEBVIEW2_USER_DATA_FOLDER`
+（WebView2 profile），**没有隔离 `POMODORO_USER_DATA`** —— 于是跑一次 M1 握手冒烟，
+就把**调试版** hook exe 写进了真实 `%APPDATA%/pomodoro-fluent/hook/`，
+顺手把那份插件覆盖成了新版（那份插件是 `install --agent opencode` 的源文件）。
+
+本次已修：`smoke-tauri.mjs` 现在**无条件**给一个临时 `POMODORO_USER_DATA`
+（同时保留原来的 WebView2 profile 开关），跑完一起清掉；已实测跑完真实目录零改动。
+⇒ **教训：脚本一旦被"被测对象"赋予了新的副作用，它的隔离清单就得跟着长。
+"我只跑个握手"也会写盘。**
+
+（`smoke-gateway.mjs` 本来就隔离了 `POMODORO_USER_DATA`，所以没这个问题 ——
+当时两个脚本的隔离程度不一致，正好被 M3 的新写盘点照亮。）
+
 ### 有意保留的行为差异（M3 追加一行）
 
 | 项 | Electron | Rust | 为什么保留 |

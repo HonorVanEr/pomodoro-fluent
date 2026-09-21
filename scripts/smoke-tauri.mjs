@@ -145,16 +145,22 @@ console.log(`[smoke] 最多尝试 ${ATTEMPTS} 次，单次超时 ${TIMEOUT_MS}ms
 /** @returns {Promise<{ok:boolean, kind:string, lines:string[], exited:any, tail:string}>} */
 function runOnce(n) {
   return new Promise((done) => {
-    // 排障开关：额外指定一个干净的 WebView2 用户数据目录
+    // 数据目录隔离 —— **两个都要**：
+    //   · POMODORO_USER_DATA：Rust 侧认它（`pomodoro_core::user_data_dir()`）。
+    //     M3 起 GUI 启动会把 `pomodoro-hook.exe` + OpenCode 插件释放进 `<userData>/hook/`，
+    //     不隔离就会把**调试版** hook 写进用户真实目录、还会顺手覆盖那份插件。
+    //   · WEBVIEW2_USER_DATA_FOLDER：另外给个干净 profile（排障开关）
     const fresh = process.env.TAURI_SMOKE_FRESH_PROFILE === '1';
-    const userDataDir = fresh ? mkdtempSync(join(tmpdir(), 'pomodoro-smoke-')) : null;
+    const userDataDir = mkdtempSync(join(tmpdir(), 'pomodoro-smoke-'));
+    const webviewProfile = fresh ? mkdtempSync(join(tmpdir(), 'pomodoro-webview-')) : null;
 
     const child = spawn(EXE, [], {
       cwd: ROOT,
       env: {
         ...process.env,
         POMODORO_SMOKE: '1',
-        ...(userDataDir ? { WEBVIEW2_USER_DATA_FOLDER: userDataDir } : {}),
+        POMODORO_USER_DATA: userDataDir,
+        ...(webviewProfile ? { WEBVIEW2_USER_DATA_FOLDER: webviewProfile } : {}),
       },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
@@ -179,8 +185,10 @@ function runOnce(n) {
 
     const cleanup = () => {
       try { child.kill('SIGKILL'); } catch { /* 已经没了 */ }
-      if (userDataDir) {
-        try { rmSync(userDataDir, { recursive: true, force: true }); } catch { /* 尽力 */ }
+      for (const d of [userDataDir, webviewProfile]) {
+        if (d) {
+          try { rmSync(d, { recursive: true, force: true }); } catch { /* 尽力 */ }
+        }
       }
     };
 
