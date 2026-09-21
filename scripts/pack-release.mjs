@@ -220,6 +220,11 @@ function packRust() {
 
   run('cargo', ['tauri', 'build'], env);
 
+  // ⚠ 闸门：`cargo tauri build` 抛异常才算失败，它"成功"并不代表安装包装齐了运行时需要的文件。
+  // NSIS 模板默认**只装 main binary** —— `bundle.resources` 漏一项，装完的用户就拿不到 hook CLI /
+  // OpenCode 插件（M5 实打实踩过：开发目录里 GUI 与 hook 天然同级，永远看不出来）。
+  run('node', ['scripts/check-installer-contents.mjs'], env);
+
   const nsisDir = join(ROOT, 'target', 'release', 'bundle', 'nsis');
   if (!existsSync(nsisDir)) fail(`没找到 Tauri 产物目录: ${nsisDir}`);
   const all = readdirSync(nsisDir).filter((f) => f.toLowerCase().endsWith('.exe'));
