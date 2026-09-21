@@ -165,7 +165,7 @@ M4 补上了**决策输出**那一半：§3b 用「预置缓存作答」验 `ask
 | Node 依赖 | Electron 版需要；**Rust 版已完全不依赖**（hook 是原生 exe，打包也不发 Node） |
 | 迁移进度 | **M0–M5 全部完成**。`scripts/smoke-interaction.js` **保留在 Electron 仓储** —— M4 实测后决定不照字面重写，改为覆盖审计 + 补缺口（见 `docs/rust-migration-plan.md` 第 13 节） |
 | 版本号 | 统一：`package.json` / `src-tauri/tauri.conf.json` / `Cargo.toml [workspace.package]` / `Cargo.lock` 都是 `1.2.0` |
-| 打包脚本 | ✅ `scripts/pack-release.mjs`（`pack:all` / `pack:rust`）—— 会**先构建 hook exe** 再 `cargo tauri build`（hook exe 是 sidecar，见 §3 后文） |
+| 打包脚本 | ✅ `scripts/pack-release.mjs`（`pack:all` / `pack:rust`）—— 会**先构建 hook exe** 再 `cargo tauri build`，末尾**自动核对安装包内容**（`scripts/check-installer-contents.mjs`，见下「打包时必须记得的一件事」） |
 | 安装包体积 | Electron **94,168,782 B（89.8 MB）** ／ Rust **1,363,113 B（1.30 MB）** |
 | 已发布的 release | [`v1.2.0`](https://github.com/HonorVanEr/pomodoro-fluent/releases/tag/v1.2.0) —— 一条 release 挂两份安装包（tag 指向 `c04f3fb`） |
 | 发布文档 | ✅ 本文 + `docs/rust-migration-plan.md` §9–14（各阶段实测与踩坑） |
@@ -186,6 +186,23 @@ NSIS **只装 GUI 那一个 exe**。hook CLI（`pomodoro-hook.exe`）与 OpenCod
 `cargo build --release -p pomodoro-hook`（`pack-release.mjs` 已经替你做了）。
 漏掉的后果不是「打包失败」而是**装上去的 hook exe 是上一版的** —— 更隐蔽，详见
 `docs/rust-migration-plan.md` §14。
+
+**已经有自动闸门**：`pack-release.mjs` 在 `cargo tauri build` 之后会跑
+`scripts/check-installer-contents.mjs`。它读 `bundle.resources`，逐条到 Tauri 生成的
+`target/release/nsis/x64/installer.nsi` 里核对「是否真有一条 `File` 指令把它拷进 `$INSTDIR`」，
+并打印源文件的大小/mtime（顺带能看出是不是本次构建的产物）。少一项就**直接让打包失败**，
+不需要人去记。单独跑、或对别的 `.nsi` 排查：
+
+```bash
+node scripts/check-installer-contents.mjs
+node scripts/check-installer-contents.mjs --nsi <别的 installer.nsi>
+```
+
+要手工核对时：
+
+```bash
+grep -n -E '^\s*(File|CreateDirectory)' target/release/nsis/x64/installer.nsi
+```
 
 Rust 版的功能对齐进度见 `docs/rust-migration-plan.md` 的 M0–M5 里程碑，
 第 9–12 节是各阶段的实测结果与踩坑记录。

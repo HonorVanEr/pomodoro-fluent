@@ -779,6 +779,27 @@ File "${MAINBINARYSRCPATH}"
 修完实测：`installer.nsi` 多出 `CreateDirectory "$INSTDIR\opencode"` 与两条 `File /a`；
 安装包 1.20 → 1.30 MB。
 
+### 把它变成闸门：`scripts/check-installer-contents.mjs`
+
+上面这个缺口是**靠人去 grep `.nsi`** 才发现的 —— 「装完就少文件」这类问题不该依赖人的记性。
+M5 收尾时补了一道自动闸门，`pack-release.mjs` 在 `cargo tauri build` 之后自动调用：
+
+- **自动跟随配置**：读 `bundle.resources`，日后加新资源**不用改脚本**；
+- **逐条核对 `installer.nsi`**：每条资源必须能找到 `File /a "/oname=<目标>"`，且 `.nsi` 里声明的
+  源路径与按配置解析出来的路径一致；
+- **源文件体检**：存在 + 非 0 字节，并打印大小/mtime（顺带能看出是不是本次构建的产物）；
+- **失败即打包失败**：`pack:rust` 直接非 0 退出，不会静默产出一个「少文件」的安装包。
+
+负数用例都验过（均须 exit 1）：
+
+| 用例 | 构造方式 | 结果 |
+|---|---|---|
+| 复现修复前 | 从当前 `.nsi` 里滤掉 `CreateDirectory "$INSTDIR…` / `File /a "/oname=` 的行 | ✗ 2 处「没进包」 |
+| 源路径对不上 | 临时 conf 把 hook exe 指到 `../nowhere/missing-hook.exe` | ✗ 路径不符 + 源文件不存在 |
+| `.nsi` 不存在 | `--nsi` 指向不存在的路径 | ✗ 带排查提示退出 |
+
+`--nsi` / `--conf` 可覆盖默认路径，便于拿历史或异常产物做排查。
+
 ### 位置口径的坑：版本号同步到哪一层
 
 `Cargo.toml` 的 `[workspace.package] version` 对两个 exe 的作用**不一样**：
@@ -801,7 +822,7 @@ build 依赖，本次未做 —— 已写进 `pack-release.mjs` 的文件头注�
 | bridge/commands 静态对齐 | ✅ 30 个桥接方法 / 23 个命令全部对上 |
 | Electron 打包产物 | ✅ asar 版本 `1.2.0`；`POMODORO_SMOKE_INSTALL=1` 成功路径走通，写进隔离临时 home |
 | `latest.yml` | ✅ version / size / sha512 与安装包一致（94,168,782 B） |
-| NSIS 打包内容 | ✅ `installer.nsi` 有 `CreateDirectory "$INSTDIR\opencode"` + 两条 `File /a` |
+| NSIS 打包内容 | ✅ 闸门实测通过：`installer.nsi` 有 `CreateDirectory "$INSTDIR\opencode"` + 两条 `File /a`（现由 `pack:rust` 末尾自动核，见上节） |
 | Rust GUI 握手（`smoke-tauri.mjs`） | ⏸ **未跑** —— 本机正跑着用户装的实例，占着单实例锁 |
 
 ### ⚠ 踩坑
@@ -823,6 +844,14 @@ build 依赖，本次未做 —— 已写进 `pack-release.mjs` 的文件头注�
 - Rust GUI 握手冒烟（`smoke-tauri.mjs`）本次没跑成，原因是单实例锁被人占着。
   M1–M4 跑过多次（干净状态 22/22），且本次 GUI 源码相比 M4 未变（只多了版本资源），
   风险低；但要留个尾巴：下次干净进程表时补跑一次。
+- **单实例锁是全局命名互斥体，换数据目录绕不过**：`tauri-plugin-single-instance` 的 Windows 实现用
+  `CreateMutexW("<identifier>[-_<版本>]-sim")` + 一对 `FindWindowW` 的隐藏窗口
+  （`…-sic` / `…-siw`）。名字只由 **app identifier（开了 `semver` feature 时再拼版本号）** 决定，
+  与 `--user-data-dir` / `POMODORO_USER_DATA` **无关** ⇒ 同一版本只要有一个实例在跑，第二个实例必然
+  把自己交给它然后退出。所以 GUI 冒烟的前置条件只能是「进程表干净」，没有旁路。
 - hook exe 无 PE 版本资源（见上「位置口径的坑」）。
+- **重跑 `pack:rust` 的产物与已发布的附件不逐字节相同**（实测 1,363,449 vs 1,363,113 B，差 336 B ——
+  NSIS/LZMA 压缩本身不可复现）。所以「本地 `release/` 里的包」不等于「用户下载到的包」；
+  要复核已发布产物就用 `gh release download vX.Y.Z -p '<附件名>' -D release --clobber` 取回来。
 
 
