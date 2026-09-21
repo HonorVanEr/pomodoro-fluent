@@ -1,0 +1,42 @@
+[package]
+name = "pomodoro"
+# 版本号/edition/license 从 workspace 继承（事实源是 package.json），别写死
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Win11 Fluent 风格的番茄钟，带系统托盘与 agent 确认弹窗"
+authors = ["HonorVanEr"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
+serde = { version = "1", features = ["derive"] }
+# ⚠ preserve_order 必须在**两个** crate 里都显式打开：workspace 一起构建时
+# feature 会合并，只在一处开会让「单独 build -p」和「build --workspace」产出的
+# JSON 键序不同。开着的收益是 config.json 的键序和 Electron 版一致（读进来什么
+# 顺序就写回去什么顺序），而不是被 BTreeMap 按字母重排。
+serde_json = { version = "1", features = ["preserve_order"] }
+pomodoro-core = { path = "../crates/core" }
+# 单实例锁：第二次启动会直接退出，并把已有实例的窗口唤到前台
+# （等价 Electron 的 requestSingleInstanceLock + second-instance）。
+tauri-plugin-single-instance = "2"
+# 「检查更新」是应用唯一的联网动作，只在用户点按钮时发一次 HTTPS 请求。
+# 选 minreq 的理由：纯同步、无 tokio；3.x 的全部依赖都是 optional；
+# 用 https-native-tls 走系统 SChannel，不把 rustls/ring 打进包里（那会多出 ~1.5 MB）。
+minreq = { version = "3", default-features = false, features = ["https-native-tls"] }
+
+# Agent 网关：本地 HTTP 服务（127.0.0.1）。
+# 选 tiny_http 而不是 axum/hyper：后者要拉一整套 tokio，编进包里是 MB 级开销，
+# 而这里的并发模型不需要异步 —— 每个 hook 一条连接，长轮询就是那条连接上的
+# 线程在 `recv_timeout` 里等，天然对上「HTTP 请求挂着、用户稍后作答」的语义。
+# tiny_http 也把 Expect: 100-continue（curl -d 超 1KB 会发）、chunked、
+# 半关闭这些容易写错的 HTTP/1.1 细节处理掉了。
+tiny_http = "0.12"
+
+# 网关门禁用的随机 token（48 位十六进制）与交互 id。
+# 必须用系统 CSPRNG，不能拿时间戳凑数 —— token 是 127.0.0.1 上唯一的门禁，
+# 同一台机器上的其他进程能直接连上来。Electron 版用的是 crypto.randomBytes(24)。
+getrandom = "0.3"

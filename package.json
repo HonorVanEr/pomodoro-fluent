@@ -7,7 +7,9 @@
     "start": "electron .",
     "smoke:interaction": "node scripts/smoke-interaction.js",
     "pack": "electron-builder --win",
-    "pack:dir": "electron-builder --win dir"
+    "pack:dir": "electron-builder --win dir",
+    "pack:rust": "node scripts/pack-release.mjs --only rust",
+    "pack:all": "node scripts/pack-release.mjs"
   },
   "author": "HonorVanEr",
   "license": "MIT",

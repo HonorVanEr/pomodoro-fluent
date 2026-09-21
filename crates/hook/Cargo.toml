@@ -1,0 +1,26 @@
+[package]
+name = "pomodoro-hook"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "宿主 hook CLI（console subsystem，必须能可靠写 stdout）"
+
+[[bin]]
+name = "pomodoro-hook"
+path = "src/main.rs"
+
+[dependencies]
+pomodoro-core = { path = "../core" }
+
+# JSON 用 serde_json 而不是手写解析器。理由：这条 CLI 的全部工作就是给 8 个宿主
+# 做 JSON 进 JSON 出，转义 / Unicode 代理对 / 数字格式里任何一个细节写错，后果都是
+# 「某个宿主的 hook 静默不生效」这种最难查的故障。省下的那点体积不值得。
+#
+# ⚠ 必须开 preserve_order（Value 内部改用 IndexMap），否则 Map 是 BTreeMap，
+# 写回用户的 settings.json / hooks.json 时**键会被按字母重排** —— 用户每装一次
+# hook 就多一份满屏 diff。JS 的 JSON.stringify 保留插入顺序，这里要对齐。
+#
+# ⚠ 这个 feature 在 src-tauri 里也显式开着：workspace 一起构建时 feature 会合并，
+# 只在一边开会导致「单独 build -p pomodoro」与「build --workspace」行为不同。
+serde_json = { version = "1", features = ["preserve_order"] }

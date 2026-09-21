@@ -2,7 +2,8 @@
  * 番茄钟 × OpenCode 插件
  *
  * 安装：
- *   node "<hook 目录>/pomodoro-hook.js" install --agent opencode
+ *   "<hook 目录>/pomodoro-hook.exe" install --agent opencode   (Tauri 版)
+ *   node "<hook 目录>/pomodoro-hook.js" install --agent opencode   (Electron 版)
  * 或手动：把本文件放到 ~/.config/opencode/plugins/pomodoro-opencode.ts，
  * 并在 ~/.config/opencode/opencode.json 里加 "plugin": ["file://<绝对路径>"]
  *
@@ -21,28 +22,35 @@ import { homedir } from "node:os"
 import { join } from "node:path"
 
 // ---- 定位 hook CLI ----
-function findHookScript() {
+// Electron 版是 node 脚本（pomodoro-hook.js），Tauri 版是原生 exe（pomodoro-hook.exe）。
+// 两个都找，exe 优先：不依赖 node、启动更快。找不到时插件整体静默放行。
+function findHookCli() {
   if (process.env.POMODORO_HOOK_PATH) return process.env.POMODORO_HOOK_PATH
   const appData = process.env.APPDATA || join(homedir(), "AppData", "Roaming")
-  const candidates = [
-    join(appData, "番茄钟", "hook", "pomodoro-hook.js"),
-    join(appData, "pomodoro-fluent", "hook", "pomodoro-hook.js"),
+  const dirs = [
+    join(appData, "番茄钟", "hook"),
+    join(appData, "pomodoro-fluent", "hook"),
   ]
-  for (const p of candidates) if (existsSync(p)) return p
+  for (const name of ["pomodoro-hook.exe", "pomodoro-hook.js"])
+    for (const dir of dirs) {
+      const p = join(dir, name)
+      if (existsSync(p)) return p
+    }
   return null
 }
 
-const HOOK = findHookScript()
+const HOOK = findHookCli()
+const HOOK_IS_EXE = !!HOOK && /\.exe$/i.test(HOOK)
 
 function callHook(subcommand, payload, timeoutMs = 30000) {
   return new Promise((resolve) => {
     if (!HOOK) return resolve(null)
     let child
     try {
-      child = spawn(process.execPath, [HOOK, subcommand], {
-        stdio: ["pipe", "pipe", "ignore"],
-        windowsHide: true,
-      })
+      // exe 直接执行；脚本交给当前 node 运行时。
+      child = HOOK_IS_EXE
+        ? spawn(HOOK, [subcommand], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
+        : spawn(process.execPath, [HOOK, subcommand], { stdio: ["pipe", "pipe", "ignore"], windowsHide: true })
     } catch {
       return resolve(null)
     }

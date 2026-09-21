@@ -1,0 +1,24 @@
+[workspace]
+resolver = "2"
+members = ["src-tauri", "crates/core", "crates/hook"]
+
+# 版本号唯一事实源是 package.json。打包脚本（scripts/pack-release.mjs）把它同步到
+# 这里，三个成员 crate 一律 `version.workspace = true` 继承 —— 这样「安装包 /
+# GUI exe / hook exe」的版本号不可能互相对不上。
+# ⚠ 别在成员 crate 里写死 version：会盖掉这里，且打包脚本管不到（曾踩过，
+# hook exe 的版本资源一直停在 2.0.0）。
+[workspace.package]
+version = "1.1.6"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/HonorVanEr/pomodoro-fluent"
+
+# 体积优先。实测目标：GUI exe + hook exe 合计进个位数 MB。
+# 注意：`[profile.*]` 只能写在 workspace 根部，写在成员 crate 里会被忽略。
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+panic = "abort"
+strip = true
+incremental = false

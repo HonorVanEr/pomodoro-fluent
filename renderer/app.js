@@ -437,10 +437,18 @@ const PomodoroApp = (() => {
     return ` · ${parts.join(' ')}`;
   }
 
+  // hook CLI 的调用前缀：Electron 版是 node 脚本（pomodoro-hook.js），Tauri 版是原生
+  // 可执行文件（pomodoro-hook.exe）。后缀是 .exe 就直接执行，否则交给 node —— 同一份
+  // 代码两个版本都能用（Electron 传 .js 时输出与旧版逐字节一致）。
+  function hookInvocation(hookPath) {
+    const p = hookPath || '';
+    return /\.exe$/i.test(p) ? `"${p}"` : `node "${p}"`;
+  }
+
   // 各家 agent 的 hook 配置片段（复制给用户粘贴/手动编辑）
   function buildHookSnippet(agent, hookPath, pluginPath) {
     // 统一带 --source，弹窗徽标才不会认错宿主
-    const cmd = (src) => `node "${hookPath}" --source ${src}`;
+    const cmd = (src) => `${hookInvocation(hookPath)} --source ${src}`;
     if (agent === 'zcode') {
       return JSON.stringify({
         hooks: {
@@ -562,7 +570,7 @@ const PomodoroApp = (() => {
 
   // 一键安装命令：交给 hook CLI 自己写配置（会先备份原文件）
   function buildInstallCommand(agent, hookPath) {
-    return `node "${hookPath}" install --agent ${agent}`;
+    return `${hookInvocation(hookPath)} install --agent ${agent}`;
   }
 
   // ---- 一键安装结果面板 ----
