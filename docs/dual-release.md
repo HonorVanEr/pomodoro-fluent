@@ -160,13 +160,32 @@ M4 补上了**决策输出**那一半：§3b 用「预置缓存作答」验 `ask
 
 | | 状态 |
 |---|---|
-| Electron 版 | 完整可用，v1.1.6；双版本改造中**功能未改**（检查更新逻辑与 `main` 完全一致）。唯一例外：`renderer/app.js` 的 hook 命令拼装新增了对 `.exe` 的分支（对 Electron **零行为变化**） |
-| Rust 版 | **M4 完成**：主窗 UI + 计时 + 迷你/贴边 + 托盘 + 网关 + 弹窗 + held 状态机 + hook CLI 与 `install` 子命令全部 Rust 化；**交互链路已按覆盖审计补齐**（自检 21 项 + 双版本差分 77 项） |
+| Electron 版 | 完整可用，**v1.2.0**；双版本改造中**功能未改**（检查更新逻辑与 `main` 完全一致）。唯一例外：`renderer/app.js` 的 hook 命令拼装新增了对 `.exe` 的分支（对 Electron **零行为变化**） |
+| Rust 版 | **M5 完成（已发布）**：主窗 UI + 计时 + 迷你/贴边 + 托盘 + 网关 + 弹窗 + held 状态机 + hook CLI 与 `install` 子命令全部 Rust 化；交互链路按覆盖审计补齐（自检 21 项 + 双版本差分 77 项）；**安装包已随 `v1.2.0` 对外发布** |
 | Node 依赖 | Electron 版需要；**Rust 版已完全不依赖**（hook 是原生 exe，打包也不发 Node） |
-| 尚未迁移 | 打包与发版（M5）。`scripts/smoke-interaction.js` **保留在 Electron 仓储** —— M4 实测后决定不照字面重写，改为覆盖审计 + 补缺口（见 `docs/rust-migration-plan.md` 第 13 节） |
-| 版本号 | 统一：`src-tauri/tauri.conf.json` 已同步为 `package.json` 的 `1.1.6` |
-| 打包脚本 | ✅ `scripts/pack-release.mjs`（`pack:all` / `pack:rust`） |
-| 发布文档 | ✅ 本文 |
+| 迁移进度 | **M0–M5 全部完成**。`scripts/smoke-interaction.js` **保留在 Electron 仓储** —— M4 实测后决定不照字面重写，改为覆盖审计 + 补缺口（见 `docs/rust-migration-plan.md` 第 13 节） |
+| 版本号 | 统一：`package.json` / `src-tauri/tauri.conf.json` / `Cargo.toml [workspace.package]` / `Cargo.lock` 都是 `1.2.0` |
+| 打包脚本 | ✅ `scripts/pack-release.mjs`（`pack:all` / `pack:rust`）—— 会**先构建 hook exe** 再 `cargo tauri build`（hook exe 是 sidecar，见 §3 后文） |
+| 安装包体积 | Electron **94,168,782 B（89.8 MB）** ／ Rust **1,363,113 B（1.30 MB）** |
+| 已发布的 release | [`v1.2.0`](https://github.com/HonorVanEr/pomodoro-fluent/releases/tag/v1.2.0) —— 一条 release 挂两份安装包（tag 指向 `c04f3fb`） |
+| 发布文档 | ✅ 本文 + `docs/rust-migration-plan.md` §9–14（各阶段实测与踩坑） |
+
+### ⚠ 打包时必须记得的一件事
+
+NSIS **只装 GUI 那一个 exe**。hook CLI（`pomodoro-hook.exe`）与 OpenCode 插件是
+**sidecar**，靠 `src-tauri/tauri.conf.json` 的 `bundle.resources` 打进 `$INSTDIR`：
+
+```json
+"resources": {
+  "../target/release/pomodoro-hook.exe": "pomodoro-hook.exe",
+  "../bin/opencode/pomodoro-opencode.ts": "opencode/pomodoro-opencode.ts"
+}
+```
+
+由于 `cargo tauri build` **只构建 GUI 那一个 bin**，打 Rust 包前必须先
+`cargo build --release -p pomodoro-hook`（`pack-release.mjs` 已经替你做了）。
+漏掉的后果不是「打包失败」而是**装上去的 hook exe 是上一版的** —— 更隐蔽，详见
+`docs/rust-migration-plan.md` §14。
 
 Rust 版的功能对齐进度见 `docs/rust-migration-plan.md` 的 M0–M5 里程碑，
 第 9–12 节是各阶段的实测结果与踩坑记录。
