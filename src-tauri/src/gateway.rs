@@ -865,6 +865,54 @@ pub fn smoke(app: &AppHandle) {
             smoke_hold_reopen(&handle),
         );
 
+        // M4 补：交互语义（不依赖 POMODORO_GATEWAY_POPUP）
+        record(
+            &mut results,
+            "interaction(ask, 用户提交答案→user)",
+            smoke_ask_submit(&handle),
+        );
+        record(
+            &mut results,
+            "interaction(permission, 用户拒绝→deny+备注)",
+            smoke_permission_deny(&handle),
+        );
+        record(
+            &mut results,
+            "interaction(ask, 用户取消→cancel)",
+            smoke_ask_cancel(&handle),
+        );
+        record(
+            &mut results,
+            "interaction(notification, 立即 shown 不阻塞)",
+            smoke_notification_shown(),
+        );
+        record(
+            &mut results,
+            "interaction(ask 空题目, 降级→shown)",
+            smoke_ask_degrade(),
+        );
+        record(
+            &mut results,
+            "event(permission/ask, 降级为通知+打断计数)",
+            smoke_event_degrade(),
+        );
+        record(
+            &mut results,
+            "hold 幂等（第二次→None）",
+            smoke_hold_idempotent(&handle),
+        );
+        record(
+            &mut results,
+            "新弹窗不顶掉已收起的（放过 held）",
+            smoke_new_popup_spares_held(&handle),
+        );
+        record(
+            &mut results,
+            "reopen 守卫（不存在/已 active→不复活）+ 原样 payload",
+            smoke_reopen_guards(&handle),
+        );
+        record(&mut results, "收尾后 pending 无泄漏", smoke_no_leak(&handle));
+
         let failed = results.iter().filter(|r| r.starts_with("FAIL")).count();
         eprintln!(
             "[gateway-smoke] {} 项，{} 失败\n  {}",
@@ -1122,6 +1170,322 @@ fn smoke_popup_answer(app: &AppHandle) -> Result<(), String> {
         Ok(Err(e)) => Err(e),
         Err(_) => Err("作答线程 panic".into()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// M4 补：交互语义（对应 Node 交互冒烟的 [1] / [1.5] 组）
+//
+// 这一组**不依赖 `POMODORO_GATEWAY_POPUP`**：要验的是「表里的状态怎么迁移」与
+// 「HTTP 侧拿到什么形状」，而不是弹窗页渲染 —— 后者由 `smoke_popup_answer` 覆盖。
+// ---------------------------------------------------------------------------
+
+/// 在 `request()` 阻塞期间模拟用户点击：等交互挂起后按 `make` 落定它。
+fn spawn_answer<F>(app: &AppHandle, wait_ms: u64, make: F) -> std::thread::JoinHandle<Result<(), String>>
+where
+    F: FnOnce(&str) -> interaction::Decision + Send + 'static,
+{
+    let app = app.clone();
+    std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_millis(wait_ms);
+        while Instant::now() <= deadline {
+            if interaction::first_pending_id(&app).is_some() {
+                // 等窗口真的建出来再答：`request` 是「先 register、后 popup::show」，
+                // 抢在 show 之前 resolve 会让窗口建出来没人收（用例不受影响，但不真实）。
+                std::thread::sleep(Duration::from_millis(500));
+                let Some(id) = interaction::first_pending_id(&app) else {
+                    return Err("交互在作答前被收走了".into());
+                };
+                return if interaction::resolve(&app, &id, make(&id)) {
+                    Ok(())
+                } else {
+                    Err(format!("resolve 失败（id={id} 已被收走？）"))
+                };
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        Err("交互始终没挂起（弹窗没建出来？）".into())
+    })
+}
+
+/// 打一次 `/api/interaction`，同时让另一根线程按 `make` 作答，返回响应体。
+fn interaction_roundtrip<F>(app: &AppHandle, body: Value, make: F) -> Result<Value, String>
+where
+    F: FnOnce(&str) -> interaction::Decision + Send + 'static,
+{
+    let answer = spawn_answer(app, 15_000, make);
+    let (code, res) = self_request("POST", "/api/interaction", Some(body))?;
+    answer.join().map_err(|_| "作答线程 panic".to_string())??;
+    if code != 200 {
+        return Err(format!("status={code} body={res}"));
+    }
+    Ok(res)
+}
+
+/// 直接往交互表里放一条（不走 HTTP、不建窗），用于验纯状态迁移。
+fn direct_register(app: &AppHandle, id: &str, title: &str) {
+    let mut p = payload::normalize_interaction(&json!({
+        "kind": "permission", "source": "manual", "title": title,
+        "permission": { "tool": "Bash", "rule": "npm test" }
+    }));
+    p.as_object_mut()
+        .expect("归一化结果一定是对象")
+        .insert("id".into(), json!(id));
+    // 故意丢弃 Receiver：本组只验状态迁移，不等待决策
+    drop(interaction::register(app, id, p, 60_000));
+}
+
+fn decision_of(res: &Value) -> (&str, &str) {
+    (
+        res.get("decidedBy").and_then(Value::as_str).unwrap_or(""),
+        res.get("action").and_then(Value::as_str).unwrap_or(""),
+    )
+}
+
+/// 提问的**答案通道**：用户选了选项 → HTTP 侧必须原样拿到 `answers`。
+///
+/// 所有宿主的 `AskUserQuestion` / `askQuestions` 都依赖这个形状，
+/// 而此前只有**权限**通道被自检覆盖过（`smoke_popup_answer`）。
+fn smoke_ask_submit(app: &AppHandle) -> Result<(), String> {
+    let res = interaction_roundtrip(
+        app,
+        json!({
+            "kind": "ask", "source": "manual", "title": "[smoke] 提问作答",
+            "questions": [{
+                "question": "选哪个？", "header": "方案",
+                "options": [{ "label": "A" }, { "label": "B" }]
+            }]
+        }),
+        |_| interaction::Decision::user("submit", json!({ "q": ["A"] }), String::new()),
+    )?;
+    let (by, action) = decision_of(&res);
+    if by != "user" || action != "submit" {
+        return Err(format!("decidedBy={by} action={action} body={res}"));
+    }
+    // answers 必须原样回传（键由题目 id 决定，这里只验值与提交的一致）
+    let first = res
+        .get("answers")
+        .and_then(Value::as_object)
+        .and_then(|o| o.values().next())
+        .cloned()
+        .unwrap_or(Value::Null);
+    if first != json!(["A"]) {
+        return Err(format!("answers 没原样回传：{first}"));
+    }
+    Ok(())
+}
+
+/// 用户**主动拒绝** —— 与「超时落 deny」是两条不同路径，两条都要有。顺带钉住备注回传。
+fn smoke_permission_deny(app: &AppHandle) -> Result<(), String> {
+    let res = interaction_roundtrip(
+        app,
+        json!({
+            "kind": "permission", "source": "manual", "title": "[smoke] 用户拒绝",
+            "permission": { "tool": "Bash", "rule": "rm -rf /" }
+        }),
+        |_| interaction::Decision::user("deny", json!({}), "不要跑这个".into()),
+    )?;
+    let (by, action) = decision_of(&res);
+    let text = res.get("text").and_then(Value::as_str).unwrap_or("");
+    if by != "user" || action != "deny" || text != "不要跑这个" {
+        return Err(format!(
+            "decidedBy={by} action={action} text={text:?} body={res}"
+        ));
+    }
+    Ok(())
+}
+
+/// 用户**主动取消**提问 → `cancel`（不是 `dismissed` —— 那等于交给终端再问一遍）。
+fn smoke_ask_cancel(app: &AppHandle) -> Result<(), String> {
+    let res = interaction_roundtrip(
+        app,
+        json!({
+            "kind": "ask", "source": "manual", "title": "[smoke] 提问取消",
+            "questions": [{ "question": "继续吗？", "options": [{ "label": "继续" }] }]
+        }),
+        |_| interaction::Decision::user("cancel", json!({}), String::new()),
+    )?;
+    let (by, action) = decision_of(&res);
+    if by != "user" || action != "cancel" {
+        return Err(format!("decidedBy={by} action={action} body={res}"));
+    }
+    Ok(())
+}
+
+/// 纯通知（无按钮）**不等待**，弹完立即 `shown` —— 否则会把 hook 挂住。
+fn smoke_notification_shown() -> Result<(), String> {
+    let t0 = Instant::now();
+    let (code, res) = self_request(
+        "POST",
+        "/api/interaction",
+        Some(json!({
+            "kind": "notification", "source": "manual",
+            "title": "[smoke] 纯通知", "message": "不该阻塞"
+        })),
+    )?;
+    let (by, action) = decision_of(&res);
+    if code != 200 || by != "shown" || action != "shown" {
+        return Err(format!(
+            "status={code} decidedBy={by} action={action} body={res}"
+        ));
+    }
+    let ms = t0.elapsed().as_millis();
+    if ms > 3000 {
+        return Err(format!("纯通知不该阻塞，实际花了 {ms}ms"));
+    }
+    Ok(())
+}
+
+/// 没有任何可作答控件的 ask 降级成通知 —— 否则会弹出一个无法提交的窗口。
+fn smoke_ask_degrade() -> Result<(), String> {
+    let (code, res) = self_request(
+        "POST",
+        "/api/interaction",
+        Some(json!({
+            "kind": "ask", "source": "manual",
+            "title": "[smoke] 空提问", "questions": []
+        })),
+    )?;
+    let (by, action) = decision_of(&res);
+    if code != 200 || by != "shown" || action != "shown" {
+        return Err(format!(
+            "status={code} decidedBy={by} action={action} body={res}"
+        ));
+    }
+    Ok(())
+}
+
+/// `/api/event` 上的 permission / ask **只当提示**（不带可作答控件），
+/// 且必须计入「打断」—— 「有个东西在等你」正是番茄钟要提醒的事。
+fn smoke_event_degrade() -> Result<(), String> {
+    let before = interruptions()?;
+    for kind in ["permission", "ask"] {
+        let (code, body) = self_request(
+            "POST",
+            "/api/event",
+            Some(json!({
+                "kind": kind, "source": "manual",
+                "message": format!("[smoke] 事件降级 {kind}")
+            })),
+        )?;
+        if code != 200 || body.get("ok").and_then(Value::as_bool) != Some(true) {
+            return Err(format!("{kind}: status={code} body={body}"));
+        }
+    }
+    let after = interruptions()?;
+    if after != before + 2 {
+        return Err(format!(
+            "打断计数应从 {before} 涨到 {}，实际 {after}",
+            before + 2
+        ));
+    }
+    Ok(())
+}
+
+fn interruptions() -> Result<u64, String> {
+    let (_, body) = self_request("GET", "/api/status", None)?;
+    body.get("activity")
+        .and_then(|a| a.get("interruptions"))
+        .and_then(Value::as_u64)
+        .ok_or_else(|| format!("status 里读不到 activity.interruptions：{body}"))
+}
+
+/// 「暂时收起」幂等：第二次必须是 `None`（否则托盘会多出一条点不动的死条目）。
+/// 顺带钉住摘要里带上了标题与工具（托盘菜单 / 提示条都读它）。
+fn smoke_hold_idempotent(app: &AppHandle) -> Result<(), String> {
+    let id = "smoke-hold-idem";
+    direct_register(app, id, "[smoke] 收起幂等");
+
+    let first = interaction::hold(app, id).ok_or("第一次 hold 应返回摘要")?;
+    if first.get("title").and_then(Value::as_str) != Some("[smoke] 收起幂等") {
+        return Err(format!("摘要里的标题不对：{first}"));
+    }
+    if first.get("tool").and_then(Value::as_str) != Some("Bash") {
+        return Err(format!("摘要里的工具名不对：{first}"));
+    }
+    if interaction::hold(app, id).is_some() {
+        return Err("第二次 hold 应返回 None（幂等）".into());
+    }
+    interaction::resolve(app, id, interaction::Decision::dismissed());
+    Ok(())
+}
+
+/// **新弹窗不顶掉已收起的** —— 用户点名要稍后处理，不该被一条新通知替他丢掉。
+///
+/// `register()` 会把所有 `active` 的按 `dismissed` 收尾，但必须放过 `held`。
+fn smoke_new_popup_spares_held(app: &AppHandle) -> Result<(), String> {
+    let (held_id, new_id) = ("smoke-spare-held", "smoke-spare-new");
+    direct_register(app, held_id, "[smoke] 先收起");
+    interaction::hold(app, held_id).ok_or("hold 没找到这条交互")?;
+
+    // 新来的这条会顶掉 active 的，但放过 held 的
+    direct_register(app, new_id, "[smoke] 后到的新弹窗");
+
+    let held = interaction::list_held(app);
+    if held.len() != 1 {
+        return Err(format!("held 应仍为 1 条，实际 {}", held.len()));
+    }
+    if held[0].get("id").and_then(Value::as_str) != Some(held_id) {
+        return Err(format!(
+            "收起的那条不该被顶掉，实际留下的是：{}",
+            held[0]
+        ));
+    }
+    if interaction::count(app) != 2 {
+        return Err(format!(
+            "两条都该在表里，实际 {}",
+            interaction::count(app)
+        ));
+    }
+
+    interaction::resolve(app, new_id, interaction::Decision::dismissed());
+    interaction::resolve(app, held_id, interaction::Decision::dismissed());
+    Ok(())
+}
+
+/// `reopen` 的守卫 + 原样重弹：不存在的 id、还 `active` 的都不能被"复活"。
+fn smoke_reopen_guards(app: &AppHandle) -> Result<(), String> {
+    let id = "smoke-reopen-guard";
+    direct_register(app, id, "[smoke] 唤回守卫");
+
+    // ① 还在弹（active）时 reopen → None（不重复弹）
+    if interaction::reopen(app, id).is_some() {
+        return Err("active 的交互不该被 reopen".into());
+    }
+    // ② 不存在的 id → None
+    if interaction::reopen(app, "smoke-nonexistent").is_some() {
+        return Err("不存在的 id 不该被 reopen".into());
+    }
+    // ③ 收起后 reopen → 拿回**原样**的 payload
+    interaction::hold(app, id).ok_or("hold 没找到这条交互")?;
+    let back = interaction::reopen(app, id).ok_or("收起后 reopen 应成功")?;
+    if back.get("id").and_then(Value::as_str) != Some(id) {
+        return Err(format!("唤回的 payload id 不对：{back}"));
+    }
+    if back.get("title").and_then(Value::as_str) != Some("[smoke] 唤回守卫") {
+        return Err(format!("唤回的 payload 标题不对：{back}"));
+    }
+    if back.get("permission").and_then(|p| p.get("tool")).and_then(Value::as_str) != Some("Bash") {
+        return Err(format!("唤回的 payload 少了 permission.tool：{back}"));
+    }
+    // ④ 唤回后状态回到 active（不再是 held）
+    if !interaction::list_held(app).is_empty() {
+        return Err("唤回后不该还留在 held".into());
+    }
+    interaction::resolve(app, id, interaction::Decision::dismissed());
+    Ok(())
+}
+
+/// 收尾后一条都不许剩（泄漏的挂起项会让托盘永远显示"N 条待处理"）。
+fn smoke_no_leak(app: &AppHandle) -> Result<(), String> {
+    interaction::dismiss_all(app, false);
+    let n = interaction::count(app);
+    if n != 0 {
+        return Err(format!("收尾后表里还剩 {n} 条"));
+    }
+    if !interaction::list_held(app).is_empty() {
+        return Err("收尾后 held 列表应为空".into());
+    }
+    Ok(())
 }
 
 /// 发一个真实 HTTP 请求到自己的网关。

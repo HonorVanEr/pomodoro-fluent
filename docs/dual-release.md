@@ -146,10 +146,13 @@ gh release create v1.1.7 --target <mergeCommit> --title v1.1.7 release/*
 `renderer/` 是两版共用的，改 UI 两边同时生效；但 **hook 的协议适配和写入的 JSON 是两套代码**，
 是这套双版本方案里最容易出错的地方。
 
-改完别只跑一边的测试 —— 跑 **`bash scripts/check-hook-parity.sh`**（M3 新增）：
+改完别只跑一边的测试 —— 跑 **`bash scripts/check-hook-parity.sh`**（M3 新增，M4 扩到 77 项）：
 它真起 Rust 版 GUI，把同一批输入同时喂给 `bin/pomodoro-hook.js` 与 `pomodoro-hook.exe`，
 逐字比对 stdout（只归一化「本来就该不同」的 hook 路径与 `since` 时间格式）。
 宿主适配漏同步、事件名/matcher/timeout 写歪，都会在这里现形。
+M4 补上了**决策输出**那一半：§3b 用「预置缓存作答」验 `ask` 的已作答路径，
+§3c 用假网关（`scripts/fake-gateway.mjs`）验 permission / cursor / codex / opencode 的已作答路径
+—— 之前这两块只在「无人作答」的退化路径上比过。
 
 ---
 
@@ -158,9 +161,9 @@ gh release create v1.1.7 --target <mergeCommit> --title v1.1.7 release/*
 | | 状态 |
 |---|---|
 | Electron 版 | 完整可用，v1.1.6；双版本改造中**功能未改**（检查更新逻辑与 `main` 完全一致）。唯一例外：`renderer/app.js` 的 hook 命令拼装新增了对 `.exe` 的分支（对 Electron **零行为变化**） |
-| Rust 版 | **M3 完成**：主窗 UI + 计时 + 迷你/贴边 + 托盘 + 网关 + 弹窗 + held 状态机 + **hook CLI 与 `install` 子命令全部 Rust 化** |
+| Rust 版 | **M4 完成**：主窗 UI + 计时 + 迷你/贴边 + 托盘 + 网关 + 弹窗 + held 状态机 + hook CLI 与 `install` 子命令全部 Rust 化；**交互链路已按覆盖审计补齐**（自检 21 项 + 双版本差分 77 项） |
 | Node 依赖 | Electron 版需要；**Rust 版已完全不依赖**（hook 是原生 exe，打包也不发 Node） |
-| 尚未迁移 | `scripts/smoke-interaction.js` → Rust 集成测试（M4）；打包与发版（M5） |
+| 尚未迁移 | 打包与发版（M5）。`scripts/smoke-interaction.js` **保留在 Electron 仓储** —— M4 实测后决定不照字面重写，改为覆盖审计 + 补缺口（见 `docs/rust-migration-plan.md` 第 13 节） |
 | 版本号 | 统一：`src-tauri/tauri.conf.json` 已同步为 `package.json` 的 `1.1.6` |
 | 打包脚本 | ✅ `scripts/pack-release.mjs`（`pack:all` / `pack:rust`） |
 | 发布文档 | ✅ 本文 |

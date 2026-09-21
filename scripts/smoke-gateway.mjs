@@ -12,16 +12,20 @@
 //     收尾，由脚本把进程杀掉。
 //
 // 判定依据是 Rust 侧 stderr 的两行：
-//   [gateway-smoke] 7 项，0 失败
+//   [gateway-smoke] 20 项，0 失败
 //     PASS health / PASS status / ...
 //   [gateway-smoke] done
 // 只要「失败数 == 0」且跑完了，就算通过。任何一项 FAIL 都会原样打印出来。
 //
 // 覆盖的用例（见 src-tauri/src/gateway.rs 的 smoke）：
-//   health / status / host 头拒绝(403) / 无 token 拒绝(401)
-//   /api/event 计数 / permission 超时→deny / ask 超时→cancel / confirm 超时
+//   接口级：health / status / host 头拒绝(403) / 无 token 拒绝(401)
+//           /api/event 计数 / 三处超时兜底（permission→deny、ask→cancel、custom）
+//   交互语义（M4 补）：ask 提交答案 / permission 用户拒绝+备注 / ask 用户取消
+//           纯通知立即 shown / 空题目 ask 降级 shown / event(permission,ask) 降级+打断计数
+//           hold 幂等 / 新弹窗不顶掉 held / reopen 守卫+原样 payload / 收尾无泄漏
 //   加 POMODORO_GATEWAY_POPUP=1（本脚本的 TAURI_SMOKE_POPUP=1）再验一条全链路：
 //   弹窗页 → bridge → 命令 → 网关 resolve → HTTP 侧拿到 decidedBy=user
+// 基线：不带 POPUP 是 20 项，带 POPUP 是 21 项（MIN_ITEMS 只兜「有用例没跑到」）。
 //
 // ## ⚠ 与 smoke-tauri.mjs 相同的头号坑：残留实例
 //
@@ -63,8 +67,10 @@ const TIMEOUT_MS = Number(
 );
 
 const DONE = '[gateway-smoke] done';
-// `[gateway-smoke] 7 项，0 失败`
+// `[gateway-smoke] 20 项，0 失败`
 const SUMMARY_RE = /\[gateway-smoke\]\s*(\d+)\s*项[，,]\s*(\d+)\s*失败/;
+// 少于这个数说明有用例没执行到（M4 后基线 20，带 POPUP 21）
+const MIN_ITEMS = 20;
 
 if (!existsSync(EXE)) {
   console.error('[smoke] 找不到可执行文件\n        先 cargo build（或传 cargo tauri build 产物的路径）');
@@ -194,7 +200,7 @@ const tick = () => {
     const total = Number(m[1]);
     const failed = Number(m[2]);
     if (failed !== 0) return finish(false, `${total} 项里有 ${failed} 项失败（见上面的 FAIL 行）`);
-    if (total < 7) return finish(false, `只跑了 ${total} 项，疑似有用例没执行到`);
+    if (total < MIN_ITEMS) return finish(false, `只跑了 ${total} 项（基线 ${MIN_ITEMS}），疑似有用例没执行到`);
     return finish(true, `网关 ${total} 项全部通过`);
   }
   // 进程提前退出且没有 done —— 多半是被单实例锁结束了，或 setup 里就炸了

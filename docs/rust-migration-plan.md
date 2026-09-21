@@ -605,3 +605,97 @@ M1/M2 的硬约束是"`renderer/` 一行不改"。M3 必须破例一处，因为
 所以它是"两版共用的同一份 renderer"里唯一该有的分叉点。
 ⇒ 合到 `main` 时这一处要一起带过去（`docs/dual-release.md` 第 6 节的六处同步之一）。
 
+
+## 13. M4 实测结果（2026-09-21）
+
+计划字面：把 `scripts/smoke-interaction.js`（908 行 / 86 条断言）改写成 Rust 集成测试。
+
+**实测后改了做法**：先做覆盖审计，再只补真缺口。M2/M3 已经把其中大部分断言在别的载体上验过了，
+照字面重写会大面积重复（且要在 `src-tauri` 里开测试可达的公开面，为测试改生产结构）。
+
+三个载体共同承担这 86 条：
+
+| 载体 | 位置 | 数量 | 验什么 |
+|---|---|---|---|
+| 网关自检 | `smoke-gateway.mjs` → `gateway.rs` 的 `smoke_*` | **21 项**（含 1 项需 `TAURI_SMOKE_POPUP=1`） | 网关 HTTP 层 + 交互状态机 |
+| 单测 | `cargo test --workspace` | **146**（GUI 76 / core 8 / hook 62） | 纯函数层（归一化、协议识别、缓存键、SHA-1、install 合并） |
+| 双版本差分 | `check-hook-parity.sh` | **77 项** | 同一输入，两版必须同一输出 |
+
+自检 11 → 21，差分 39 → 77。新增的这几节才是 M4 的实质产出：
+
+| 节 | 数量 | 为什么需要 |
+|---|---|---|
+| §3b 决策输出（预置缓存作答） | 12 | §3 只喂「无人作答」的输入，两边都走「不输出、交回宿主原生询问」，恰好把 `ancli.rs` 里**最宿主专属的那段整个跳过**了 |
+| §3c 决策输出（假网关作答） | 21 | `handle_permission` / cursor / codex / opencode **不读缓存**（只有 `handleAsk` 读），只能用假网关喂决策 |
+| §4b install 未知宿主退出码 | 1 | 前端「一键安装」靠退出码判成败，两版必须都非零 |
+| §5b codex `config.toml` + 失败路径 | 4 | `notify` 是否被覆盖 / `--with-notify` 备份 / hooks 关闭告警 / 写盘失败退出码 |
+
+### 手法一：预置缓存作答（§3b）
+
+`handleAsk` 命中 `%TEMP%/pomodoro-hook-cache/<sha1(id)[:20]>.json` 就直接返回、**不发 HTTP、不弹窗**；
+把缓存预置成「用户已作答」，就能在无人值守下拿到那段宿主专属 JSON 并逐字节比对。
+缓存 id 取 payload 的 `tool_use_id`，脚本可以直接构造键（`sha1sum | cut -c1-20`）。
+
+覆盖：claude 的 PreToolUse / PermissionRequest × 提交 / 拒绝 / 取消、vscode 的 deny 模式与
+`POMODORO_ASK_MODE` 覆盖、zcode / trae / qwen 提交、多问题 + 无选项（自定义输入）、
+multiSelect 数组保留，以及「缓存里是上次超时的空 result → 必须静默」。
+
+⚠ **反直觉点**：`answers` 按**问题 id**（`q0`/`q1`）索引、值是**数组**（`{"q0":["A"]}`）。
+按问题文本索引、或给字符串值，都能"跑通"但会静默产出**空 map** —— 用例是绿的，却什么都没验到。
+
+### 手法二：假网关喂决策（§3c）
+
+`scripts/fake-gateway.mjs`（新增）只实现 hook 会打的几个端点，`/api/interaction` 的答复从
+`POMODORO_FAKE_REPLY` 指向的文件**每次请求重读**，于是同一进程逐用例换答复；
+配合 `POMODORO_PORT` + `POMODORO_TOKEN`，hook 会**跳过网关发现文件**直接连它。
+纯测试侧，不进生产代码，不被别处 require。
+
+覆盖：claude 审批 allow / allow+备注 / 始终允许（带 `updatedPermissions`）/ deny、
+codex 的 fail-closed（始终允许**不带** `updatedPermissions`）、cursor 的
+`beforeShellExecution` / `beforeReadFile` 双态 + `preToolUse` 提问 + `beforeSubmitPrompt` + `stop`、
+opencode 的 `{status}` 三态与 `{reject}`，外加**铁律用例**：
+`decidedBy=timeout` 时必须静默（兜底值不算用户决定）。
+
+### 86 条 → 覆盖位置
+
+| JS 分组 | 条数 | Rust 覆盖位置 |
+|---|---|---|
+| [1] 弹窗四型 / 超时兜底 / 旧 `/api/confirm` | 11 | 自检 12 项（`interaction(*,timeout→…)`、`confirm(custom,timeout)`、`弹窗内作答`、`用户拒绝→deny+备注`、`用户取消→cancel`、`notification 立即 shown`、`event(permission/ask) 降级+打断计数`）+ §3c 的 allow / allow-always / deny / timeout 静默 |
+| [1.5] hold / 唤回 | 12 | 自检 `收起→唤回→作答`、`hold 幂等`、`新弹窗不顶掉已收起的`、`reopen 守卫(不存在/已 active)+原样 payload`、`收尾后 pending 无泄漏`（M4 新增 5 项）；⚠ 第 22 条**未覆盖**，见下 |
+| [2] Claude 协议 | 7 | §3 退化 + §3b（提交/拒绝/取消）+ §3c（审批 allow/始终允许/deny）；⚠ 第 28 条部分 |
+| [2.1] 上下文 / 会话 | 7 | 单测 `session::*`（8 条）+ §1 `sessions`（含 2 条预置）+ 单测 `build_context_*` |
+| [2.7] VS Code | 7 | §3 + §3b `vscode askQuestions 提交→deny` + 单测 `source_detection_*`；⚠ 第 41 条属 renderer |
+| [2.8] Trae | 7 | §3 + §3b `trae 提交→allow` + 单测 `source_detection_*` |
+| [2.9] Cursor | 6 | §3 退化 + §3c 六条（含 `beforeSubmitPrompt` / `stop` / 提问已作答） |
+| [2.95] Codex | 9 | §1 `codex-notify` + §3c 四条 + 单测 `detect_source` / `local_rules_*`；「第二次不再弹窗」由 §3c 本地规则用例覆盖 |
+| [3] OpenCode | 3 | §1 三条 + §3c 四条 |
+| [4] 一键安装 | 15 | §1 九条 `install --print` + §4 产物形态 + §4b 未知宿主 + §5b 四条 + §5 九次真写盘 + §6 `--clean` + 单测 `install::*`（8 条） |
+| [5] 收尾 | 2 | 自检 `收尾后 pending 无泄漏` + `打断计数已累计` |
+
+### 仍然没覆盖的（诚实清单）
+
+| 断言 | 为什么没补 |
+|---|---|
+| [1.5] 第 22 条「被顶掉场景下原交互仍可作答」 | 自检只覆盖「新弹窗不顶掉 held」；顶替走同一 `resolve` 路径，风险低但确实没专门用例 |
+| [2] 第 28 条「同一提问双触发 → 复用决策」 | 复用机制本身有单测（`cache_key_*`）+ §3b 隐含证明（缓存命中即返回），但「PreToolUse 与 PermissionRequest 同时到」的**时序**没有集成用例 |
+| [2.1] 第 31 条「HTTP context 完整保留」 | 单测钉了 `build_context` 形状；端到端的「弹窗拿到的 payload 与 CLI 组的一致」只有自检的 resolve 用例间接覆盖 |
+| [2.7] 第 41 条「提问弹窗带出选项与来源」 | 属 `renderer/notify.js` 渲染，Rust 侧无对应代码（M1 已证 renderer 逐字节等价） |
+| [2.7] 第 43/44 条「网关接受 pre-compact / subagent-start」 | `/api/event` 的 kind 白名单同路径已被 `event(notification)` / `event(tool-after)` 覆盖 |
+| [4] 第 80–82 条 | 已在 §5b 覆盖（原先列在这里，M4 补齐） |
+| [4] 第 84 条「写盘失败」 | 已由 §5b 覆盖（把 `~/.trae-cn` 做成文件） |
+
+### 踩到的坑（都在测试侧）
+
+1. **本地规则是两版共用的状态** → 同一用例「先跑 Rust 再跑 JS」，若 Rust 走了 `allow-always`
+   会落一条规则，JS 于是提前命中规则、**根本不发 HTTP**，文案变成「命中本地规则」，
+   看着像两版行为不一致。最阴的是**只在部分宿主显形**：`claude` 不在 `LOCAL_RULE_SOURCES`，
+   同一个用例在 claude 上是 PASS、在 codex 上才 FAIL。修法：两次运行之间清掉 `always-allow.json`。
+2. **MSYS 路径 Node 读不到** → `POMODORO_FAKE_REPLY=/tmp/...` 时假网关静默退回 `{}`，
+   两边都静默、diff 相等 → 又是「看着 PASS、什么都没验到」。必须给 `cygpath -w` 的 Windows 路径。
+3. **告警走的是 stdout 不是 stderr** → `2>&1 >/dev/null` 这种写法拿了 stderr，结果两版都「空」，
+   差点被当成「TS 漏了告警」。JS harness 用的是 `res.out`（stdout），
+   说明这条告警本来就在正常输出流里。
+4. 上面 1、2 都是被 §3b/§3c **每条用例都带期望值**（非空 / 静默）的断言逼出来的 ——
+   若只比「两边是否相同」，这三个坑全会以 PASS 的面目留下。
+
+
