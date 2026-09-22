@@ -35,6 +35,7 @@ mod popup;
 mod smoke;
 mod state;
 mod tray;
+mod watchdog;
 mod window;
 
 // `Manager` 提供 `AppHandle`/`Window` 上的 `state()` / `app_handle()` 等方法，
@@ -54,6 +55,9 @@ fn main() {
     // 自检模式（POMODORO_SMOKE=1）：必须在这里初始化，且要早于建窗口 ——
     // 渲染层一加载就会打启动期的那两个 invoke。见 src/smoke.rs。
     smoke::init();
+    // 主线程停滞看门狗的开关（默认开，`POMODORO_UI_WATCHDOG=0` 关）。
+    // 只决定开关，线程在 setup 里起 —— 见 [`watchdog`]。
+    watchdog::init();
 
     tauri::Builder::default()
         // 单实例必须**第一个**注册：重复启动时它会直接把进程结束掉，
@@ -128,6 +132,10 @@ fn main() {
             }
             // 自检模式：起一个只看窗口标题的取证线程（见 smoke::watch_title）
             smoke::watch_title(&handle);
+            // 主线程停滞看门狗：每 500ms 往主线程要一次回执，超过 3s 就判定卡死并把
+            // 「当时正在执行的原生调用」写进 `<userData>/watchdog.log`。
+            // 正常使用下一个字节都不写。见 [`watchdog`] 的模块头注释。
+            watchdog::start(&handle);
             smoke::step("setup 返回");
             Ok(())
         })
