@@ -377,8 +377,16 @@ fn extract_notes(out: &str) -> String {
 ///
 /// 与 Electron 版唯一的差别：Rust 版 CLI 是原生 exe，**运行时不依赖 node**，
 /// 所以不再探 node —— `nodeVersion` 恒为空、`nodeMissing` 恒为 `false`。
+///
+/// # 为什么必须 `async`
+///
+/// `Command::output()` 是**无界等待**：要等外部进程退出并收齐 stdout/stderr。
+/// 杀毒 / DLP 扫描新建进程、目标配置目录被占用、CLI 自身卡住，都能把它从毫秒拖到
+/// 秒级甚至更久。而 Tauri 的**同步命令跑在主线程上**（实测 `ThreadId(1)`），
+/// 一停就冻住整个界面 —— 关闭 / 最小化按钮、托盘菜单全部没反应，倒计时却照常走。
+/// 所以这里和 [`app_check_update`] 用同一个写法：`async` + `spawn_blocking`。
 #[tauri::command]
-pub fn hook_install(agent: String, clean: bool) -> Value {
+pub async fn hook_install(agent: String, clean: bool) -> Value {
     // 参数名不能带下划线前缀（tauri 宏的参数名会转 camelCase，键名对不上）。
     let agent = if HOOK_AGENTS.contains(&agent.as_str()) {
         agent
@@ -387,6 +395,25 @@ pub fn hook_install(agent: String, clean: bool) -> Value {
     };
     let command = manual_install_command(&agent, clean);
 
+    let task_agent = agent.clone();
+    let task_command = command.clone();
+    match tauri::async_runtime::spawn_blocking(move || {
+        run_hook_install(&task_agent, clean, &task_command)
+    })
+    .await
+    {
+        Ok(v) => v,
+        // 任务被取消 / panic：返回形状必须和成功路径一致，
+        // 渲染层 `renderInstallResult` 按同一套字段读。
+        Err(e) => json!({
+            "ok": false, "agent": agent, "command": command, "files": [], "log": "",
+            "message": format!("安装任务异常：{e}"),
+        }),
+    }
+}
+
+/// [`hook_install`] 的阻塞部分。跑在阻塞线程池上，**不占主线程**。
+fn run_hook_install(agent: &str, clean: bool, command: &str) -> Value {
     let Some(exe) = config::ensure_hook_exe() else {
         return json!({
             "ok": false, "agent": agent, "command": command, "files": [],
@@ -395,13 +422,16 @@ pub fn hook_install(agent: String, clean: bool) -> Value {
         });
     };
 
-    let mut args: Vec<String> = vec!["install".into(), "--agent".into(), agent.clone()];
+    let mut args: Vec<String> = vec!["install".into(), "--agent".into(), agent.to_string()];
     if clean {
         args.push("--clean".into());
     }
 
-    // `output()` 会等进程退出并收齐 stdout/stderr；hook CLI 的 install 是纯本地写盘，
-    // 不碰网关，所以不需要超时（Electron 版给的 20s 只是保险，这里由 CLI 自己很快返回）。
+    // 这段跑在 `spawn_blocking` 的阻塞线程上，**不占主线程** —— 所以不需要 Electron
+    // 版那个 20s 兜底超时：真卡住也只是这一次安装失败，界面照常能用。
+    // hook CLI 的 install 是纯本地写盘、不碰网关，实测 30ms 级返回。
+    // `output()` 会把子进程的 stdin 接到空句柄（不继承我们的），所以 CLI 里读 stdin
+    // 也不会挂住。
     let (exit_code, spawn_err, stdout, stderr) = match Command::new(&exe).args(&args).output() {
         Ok(o) => (
             o.status.code().unwrap_or(-1),

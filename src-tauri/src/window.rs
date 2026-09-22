@@ -17,14 +17,25 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Webview
 
 use crate::geometry::{self, Edge, Metrics, Rect, DOCK_HIDE_PAD, DOCK_REVEAL_PAD};
 use crate::state::{lock, AppState, Drag, WindowState};
+use crate::watchdog;
 
 /// 主窗口 label
 pub const MAIN: &str = "main";
 
 /// 迷你模式拖拽的轮询间隔（ms），与 Electron 版一致
 const DRAG_POLL_MS: u64 = 16;
+/// 单次拖拽的硬上限（ms）。正常拖拽是秒级，这个值只是防「按键状态本身也不可信」
+/// 时线程永久泄漏（例如输入桌面被切走、物理按键卡死）。
+const DRAG_MAX_MS: u64 = 120_000;
 /// 「延时收回」重试间隔（ms）
 const DOCK_HIDE_RETRY_MS: u64 = 300;
+/// 「延时收回」最多重试几次。
+///
+/// **必须有上限**：光标位置取不到时 [`cursor`] 会退化成 `NaN`，而
+/// [`geometry::cursor_in_rect_padded`] 把 `NaN` 当作「还在窗口上」（这是刻意的，
+/// 免得拿不到坐标就误收起）。两者叠加就成了**每 300ms 起一条新线程的死循环**，
+/// 这是本文件里唯一的无界循环。
+const DOCK_HIDE_MAX_RETRY: u32 = 10;
 /// 抢前台失败后闪任务栏的延迟（ms）
 const FOREGROUND_RETRY_MS: u64 = 300;
 
@@ -268,10 +279,18 @@ pub fn set_pin_mini(app: &AppHandle, on: bool) {
         // 顺序照搬 Electron：先解除尺寸下限（否则缩不到 176 宽），再禁用手动缩放
         let _ = win.set_min_size(None::<PhysicalSize<u32>>);
         let _ = win.set_resizable(false);
-        apply_rect(&win, target);
+        watchdog::timed("apply_rect(进入迷你)", || apply_rect(&win, target));
         let _ = win.set_always_on_top(true);
-        // 迷你悬浮视同隐藏窗口：撤下任务栏按钮，只保留小窗与托盘
-        let _ = win.set_skip_taskbar(true);
+        // 迷你悬浮视同隐藏窗口：撤下任务栏按钮，只保留小窗与托盘。
+        //
+        // ⚠ `set_skip_taskbar` 是这里唯一**跨进程**的窗口调用：tao 的实现是
+        // `CoCreateInstance(TaskbarList)` + `DeleteTab/AddTab`，也就是同步 COM 到
+        // explorer。explorer 忙或正在重启时这条调用会长时间不返回 —— 而它跑在主
+        // 线程上，一停就是「界面全死、倒计时照走」。给它登记看门狗标签，真要卡住
+        // 日志会直接点名它。
+        watchdog::timed("set_skip_taskbar(true)", || {
+            let _ = win.set_skip_taskbar(true);
+        });
     } else {
         let cur = bounds(&win).unwrap_or(Rect::new(0, 0, m.full_w, m.full_h));
         let saved = win_state(app).full;
@@ -290,7 +309,9 @@ pub fn set_pin_mini(app: &AppHandle, on: bool) {
         )));
         let _ = win.set_resizable(true);
         let _ = win.set_always_on_top(false);
-        let _ = win.set_skip_taskbar(false);
+        watchdog::timed("set_skip_taskbar(false)", || {
+            let _ = win.set_skip_taskbar(false);
+        });
     }
 }
 
@@ -347,35 +368,87 @@ pub fn start_drag(app: &AppHandle) {
     let generation = DRAG_GENERATION.fetch_add(1, Ordering::SeqCst) + 1;
 
     let handle = app.clone();
-    std::thread::spawn(move || loop {
-        std::thread::sleep(Duration::from_millis(DRAG_POLL_MS));
-        // 这一轮拖拽已经结束（或被新的一次取代）→ 线程退出
-        if DRAG_GENERATION.load(Ordering::SeqCst) != generation {
-            break;
-        }
-        let Some(mut drag) = win_state(&handle).drag else { break };
-        let Some(win) = main_window(&handle) else { break };
-        let (cx, cy) = cursor_i32(&win);
+    std::thread::spawn(move || {
+        let started = std::time::Instant::now();
+        loop {
+            std::thread::sleep(Duration::from_millis(DRAG_POLL_MS));
+            // 这一轮拖拽已经结束（或被新的一次取代）→ 线程退出
+            if DRAG_GENERATION.load(Ordering::SeqCst) != generation {
+                break;
+            }
+            // 物理左键已经松开 → 本轮拖拽结束。
+            //
+            // ⚠ 这条兜底是必需的，别删。拖拽的结束信号本来只有渲染层的 `pointerup`，
+            // 而 `pointerup` 在几个真实场景下会**丢**：安全桌面 / UAC 提示接管输入、
+            // 锁屏或远程桌面切走输入桌面、触摸笔的 pointercancel 没送达、窗口焦点被
+            // 别的进程抢走。一旦丢了，这一轮就永远收不到 `end_drag` —— 窗口会以 16ms
+            // 的周期一直粘着光标跑，表现就是「主界面所有按钮都点不动、托盘右键也不弹
+            // 菜单」（窗口总能追到鼠标那儿去），同时倒计时照常走，看着像整个应用死了。
+            // 直接问系统要按键状态，不依赖渲染层。
+            if !left_button_down() || started.elapsed() > Duration::from_millis(DRAG_MAX_MS) {
+                // 收尾照旧走主线程：`end_drag` 里有窗口 API 与共享状态，
+                // 不能在这个轮询线程上直接跑。
+                let h = handle.clone();
+                let _ = handle.run_on_main_thread(move || end_drag(&h));
+                break;
+            }
+            let Some(mut drag) = win_state(&handle).drag else { break };
+            let Some(win) = main_window(&handle) else { break };
+            let (cx, cy) = cursor_i32(&win);
 
-        // 只有光标真的深入另一块屏才换基准屏，否则接缝处会逐帧翻转限位屏幕
-        let areas = work_areas(&win);
-        if let Some(here) = geometry::work_area_at_point(cx, cy, &areas) {
-            if here != drag.wa {
-                let m = metrics_for(&win);
-                if geometry::beyond_work_area((cx, cy), drag.wa, m.drag_switch_margin) {
-                    drag.wa = here;
-                    edit_win(&handle, |w| {
-                        if let Some(d) = w.drag.as_mut() {
-                            d.wa = here;
-                        }
-                    });
+            // 只有光标真的深入另一块屏才换基准屏，否则接缝处会逐帧翻转限位屏幕
+            let areas = work_areas(&win);
+            if let Some(here) = geometry::work_area_at_point(cx, cy, &areas) {
+                if here != drag.wa {
+                    let m = metrics_for(&win);
+                    if geometry::beyond_work_area((cx, cy), drag.wa, m.drag_switch_margin) {
+                        drag.wa = here;
+                        edit_win(&handle, |w| {
+                            if let Some(d) = w.drag.as_mut() {
+                                d.wa = here;
+                            }
+                        });
+                    }
                 }
             }
-        }
 
-        let (nx, ny) = geometry::drag_position((cx, cy), drag.offset, drag.size, drag.wa);
-        let _ = win.set_position(PhysicalPosition::new(nx, ny));
+            let (nx, ny) = geometry::drag_position((cx, cy), drag.offset, drag.size, drag.wa);
+            let _ = win.set_position(PhysicalPosition::new(nx, ny));
+        }
     });
+}
+
+/// `GetAsyncKeyState` 的返回值 → 「此刻是否按着」。
+///
+/// 只认**最高位**（`0x8000` ＝ 当前按下）。最低位是"本线程上次调用之后按过没有"，
+/// 与拖拽无关 —— 认错这一位就会把"曾经按过"当成"还按着"，兜底等于没做。
+///
+/// 抽成纯函数是为了能单测这个位运算：写反了就恒假 → 拖拽一开始就被判定"已松手"，
+/// 拖不动；或恒真 → 兜底永不触发。
+#[cfg(windows)]
+fn is_down_from_async_state(raw: i16) -> bool {
+    (raw as u16) & 0x8000 != 0
+}
+
+#[cfg(windows)]
+fn left_button_down() -> bool {
+    /// `VK_LBUTTON` 恒为 `0x01`（Win32 稳定 ABI）。直接写字面量可以避开绑定 crate
+    /// 之间 `VIRTUAL_KEY` 是 newtype 还是裸 `u16` 的类型漂移。
+    const VK_LBUTTON: i32 = 0x01;
+    is_down_from_async_state(unsafe { GetAsyncKeyState(VK_LBUTTON) })
+}
+
+/// 非 Windows 平台没有这个兜底（本项目只发 Windows 版）。
+/// 返回 `true` ＝ "当作还按着"，也就是把兜底关掉，行为退回改动前。
+#[cfg(not(windows))]
+fn left_button_down() -> bool {
+    true
+}
+
+#[cfg(windows)]
+#[link(name = "user32")]
+extern "system" {
+    fn GetAsyncKeyState(vkey: i32) -> i16;
 }
 
 /// 结束拖拽线程（不动贴边状态）。
@@ -435,7 +508,10 @@ pub fn apply_dock_geometry(app: &AppHandle) {
     // 优先用吸附瞬间快照的工作区；快照失效（拔掉副屏等）才按窗口当前位置重新匹配
     let wa = s.dock_wa.unwrap_or_else(|| work_area_for(&win, b));
     let m = metrics_for(&win);
-    apply_rect(&win, geometry::dock_geometry(edge, b, wa, s.dock_hidden, &m));
+    let target = geometry::dock_geometry(edge, b, wa, s.dock_hidden, &m);
+    // 贴边滑出/收回要改窗口尺寸 → 会走到 WebView2 的 put_Bounds。
+    // 登记标签，卡住时能区分是「移动」还是「改尺寸」这一步。
+    watchdog::timed("apply_rect(贴边)", || apply_rect(&win, target));
     send_dock_state(app);
 }
 
@@ -465,7 +541,12 @@ pub fn schedule_dock_hide(app: &AppHandle, delay_ms: u64) {
         w.hide_token = w.hide_token.wrapping_add(1);
         w.hide_token
     });
-    let handle = app.clone();
+    spawn_dock_hide(app.clone(), delay_ms, token, DOCK_HIDE_MAX_RETRY);
+}
+
+/// [`schedule_dock_hide`] 的执行体。拆出来只为把「重试额度」变成参数 ——
+/// 重试**必须有上限**，理由见 [`DOCK_HIDE_MAX_RETRY`]。
+fn spawn_dock_hide(handle: AppHandle, delay_ms: u64, token: u64, retries_left: u32) {
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(delay_ms));
         {
@@ -480,10 +561,14 @@ pub fn schedule_dock_hide(app: &AppHandle, delay_ms: u64) {
         // 收回前校验光标真实位置：窗口展开/收起瞬间 DOM 的 pointerleave 可能误报
         // （命中测试变化），光标其实还在窗口上。这时延后重试，避免"弹出又立刻收回"
         // 的抖动，也避免收回后光标恰在细条上引发的循环。
-        if geometry::cursor_in_rect_padded(cursor(&win), b, DOCK_HIDE_PAD) {
-            schedule_dock_hide(&handle, DOCK_HIDE_RETRY_MS);
+        if retries_left > 0 && geometry::cursor_in_rect_padded(cursor(&win), b, DOCK_HIDE_PAD) {
+            spawn_dock_hide(handle.clone(), DOCK_HIDE_RETRY_MS, token, retries_left - 1);
             return;
         }
+        // 额度用完还认为「光标在窗口上」→ 照常收回。
+        // 收回是**自纠正**的：光标真在细条上会立刻再 pointerenter 滑出来（细条本来
+        // 就是为悬停设计的），所以这里宁可收回来，也绝不能无上限地每 300ms 起一条
+        // 新线程。
         // 重试期间可能又被取消 / 又滑出了，落地前再确认一次
         let proceed = edit_win(&handle, |w| {
             if w.hide_token != token || !w.mini || w.dock.is_none() || w.dock_hidden {
@@ -497,4 +582,21 @@ pub fn schedule_dock_hide(app: &AppHandle, delay_ms: u64) {
         }
         apply_dock_geometry(&handle);
     });
+}
+
+#[cfg(all(test, windows))]
+mod button_tests {
+    use super::is_down_from_async_state;
+
+    #[test]
+    fn async_state_only_reads_the_high_bit() {
+        // 最高位（0x8000）= 此刻按下；最低位 = 本线程"上次调用之后按过没有"，与拖拽无关。
+        assert!(!is_down_from_async_state(0), "全 0 = 没按");
+        // 只有最低位：曾被记录过但**已经松开** —— 认错这一位会让兜底失去意义
+        assert!(!is_down_from_async_state(1), "只看最低位 → 必须判为没按");
+        assert!(!is_down_from_async_state(i16::MAX), "0x7FFF 最高位是 0");
+        // 最高位为 1 的两种形态：0x8000（刚按下）与 0x8001（按下 + 用过）
+        assert!(is_down_from_async_state(i16::MIN), "0x8000 = 按着");
+        assert!(is_down_from_async_state(-32767), "0x8001 = 按着");
+    }
 }

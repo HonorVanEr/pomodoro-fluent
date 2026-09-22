@@ -23,6 +23,7 @@ use tauri::tray::{MouseButton, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use tauri::{AppHandle, Manager, Wry};
 
 use crate::state::{lock, AppState, TrayPatch};
+use crate::watchdog;
 use crate::window;
 
 /// 托盘 id（`app.tray_by_id` 用它取回来改图标/菜单）
@@ -190,7 +191,9 @@ pub fn rebuild_menu(app: &AppHandle, running: bool) {
         return;
     };
     if let Ok(menu) = build_menu(app, running) {
-        let _ = tray.set_menu(Some(menu));
+        // 菜单是 HMENU（进程内对象），但 `set_menu` 之后 tray-icon 还要改图标/提示，
+        // 一并登记标签，别让托盘卡住时无从下手。
+        let _ = watchdog::timed("tray.set_menu", || tray.set_menu(Some(menu)));
     }
 }
 
@@ -325,7 +328,9 @@ pub fn sync_from_patch(app: &AppHandle, patch: &TrayPatch) {
     // 图标颜色：仅阶段变化时更新
     if sync.phase.as_deref() != Some(phase.as_str()) {
         if let Some(icon) = icon_for_phase(&phase).or_else(|| app.default_window_icon().cloned()) {
-            let _ = tray.set_icon(Some(icon));
+            // `Shell_NotifyIcon` 是跨进程调用（到 explorer 的托盘窗口）。
+            // 这条每秒都可能跑一次，是托盘侧唯一能長時間阻塞主线程的点。
+            let _ = watchdog::timed("tray.set_icon", || tray.set_icon(Some(icon)));
         }
         sync.phase = Some(phase);
     }
@@ -333,7 +338,9 @@ pub fn sync_from_patch(app: &AppHandle, patch: &TrayPatch) {
     // 否则每秒一次的倒计时刷新会把「N 条确认待处理」冲掉，收起入口就"消失"了。
     if sync.time_text.as_deref() != Some(time_text.as_str()) {
         let pending = sync.pending.unwrap_or(0);
-        let _ = tray.set_tooltip(Some(tooltip_text(Some(time_text.as_str()), pending)));
+        let _ = watchdog::timed("tray.set_tooltip(sync)", || {
+            tray.set_tooltip(Some(tooltip_text(Some(time_text.as_str()), pending)))
+        });
         sync.time_text = Some(time_text);
     }
     // 菜单：仅运行状态变化时重建
@@ -362,5 +369,7 @@ pub fn set_pending_tooltip(app: &AppHandle, count: usize) {
     if !changed {
         return;
     }
-    let _ = tray.set_tooltip(Some(tooltip_text(time_text.as_deref(), count)));
+    let _ = watchdog::timed("tray.set_tooltip(pending)", || {
+        tray.set_tooltip(Some(tooltip_text(time_text.as_deref(), count)))
+    });
 }
