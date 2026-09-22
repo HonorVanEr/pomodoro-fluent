@@ -1,5 +1,13 @@
 'use strict';
 
+// 屏蔽右键菜单：Electron 默认本来就不弹，WebView2（Rust 版）会弹系统默认菜单，
+// 两版统一在渲染层拦掉。输入框内保留默认菜单（方便粘贴）。
+document.addEventListener('contextmenu', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  e.preventDefault();
+});
+
 // ============================================================
 // 番茄钟核心逻辑
 // ============================================================
@@ -723,7 +731,7 @@ const PomodoroApp = (() => {
     try {
       const info = await window.pomodoro.getAppInfo();
       dom.aboutVersion.textContent = `v${info.version}`;
-      dom.aboutMeta.textContent = `Electron ${info.electron} · Node ${info.node} · ${info.platform} · ${info.license}`;
+      dom.aboutMeta.textContent = `${info.platform} · ${info.license}`;
       if (dom.btnOpenRepo) dom.btnOpenRepo.dataset.url = info.repoUrl;
     } catch (e) {
       dom.aboutVersion.textContent = '未知';
