@@ -4,10 +4,10 @@
 // ---------------------------------------------------------------------------
 // 桥接对齐检查：renderer/ ←→ bridge.js ←→ commands.rs
 //
-// Rust 版不许改 `renderer/`，所以渲染层对主进程的所有期待都必须由
+// `renderer/` 不许改，所以渲染层对主进程的所有期待都必须由
 // `src-tauri/src/bridge.js` 一个人补齐。这条链上有三个点会**静默**断掉：
 //
-//   1. preload.js 暴露过、但 bridge.js 忘了补的方法
+//   1. 契约里有、但 bridge.js 忘了补的方法
 //      → 渲染层调到就是 `undefined is not a function`，且往往死在初始化那一段，
 //        整个界面直接不动。（真踩过：漏了 `requestHeldPending`，而渲染层是
 //        在启动时**无条件**调一次的。）
@@ -16,6 +16,9 @@
 //        表现是"点了没反应"，最难查。
 //   3. commands.rs 有、bridge.js 从没调过的命令
 //      → 只是死代码，不致命，报出来当提示。
+//
+// 基准是 `src-tauri/renderer-contract.json`（冻结自 Electron 版 preload.js 暴露的
+// 30 个方法；那个实现已归档到 `electron-archive` 分支，清单随本仓库维护）。
 //
 // 用法：node scripts/check-bridge-parity.mjs
 // 退出码：0 = 对齐；1 = 有缺项（会列出缺什么）。
@@ -28,12 +31,12 @@ import { fileURLToPath } from 'node:url';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const read = (rel) => readFileSync(join(ROOT, rel), 'utf8');
 
-const PRELOAD = 'preload.js';
+const CONTRACT = 'src-tauri/renderer-contract.json';
 const BRIDGE = 'src-tauri/src/bridge.js';
 const COMMANDS = 'src-tauri/src/commands.rs';
 const RENDERER_FILES = ['renderer/app.js', 'renderer/notify.js'];
 
-for (const rel of [PRELOAD, BRIDGE, COMMANDS, ...RENDERER_FILES]) {
+for (const rel of [CONTRACT, BRIDGE, COMMANDS, ...RENDERER_FILES]) {
   if (!existsSync(join(ROOT, rel))) {
     console.error(`[bridge] 找不到 ${rel}`);
     process.exit(1);
@@ -41,7 +44,7 @@ for (const rel of [PRELOAD, BRIDGE, COMMANDS, ...RENDERER_FILES]) {
 }
 
 // 取出某个对象字面量里缩进为 N 个空格的顶层键名。
-// 靠缩进区分"对象自己的键"和"键值里的函数体"——两边文件都是这个排版风格。
+// 靠缩进区分"对象自己的键"和"键值里的函数体"——bridge.js 就是这个排版风格。
 function objectKeys(src, startMarker, indent) {
   const lines = src.split(/\r?\n/);
   const start = lines.findIndex((l) => l.includes(startMarker));
@@ -58,10 +61,16 @@ function objectKeys(src, startMarker, indent) {
   return keys;
 }
 
-const preloadKeys = objectKeys(read(PRELOAD), "exposeInMainWorld('pomodoro'", 2);
+const contract = JSON.parse(read(CONTRACT));
+const contractKeys = contract.methods;
+if (!Array.isArray(contractKeys) || contractKeys.length === 0) {
+  console.error(`[bridge] ${CONTRACT} 的 methods[] 为空或形状不对`);
+  process.exit(1);
+}
+
 const bridgeKeys = objectKeys(read(BRIDGE), 'window.pomodoro = {', 4);
-if (!preloadKeys || !bridgeKeys) {
-  console.error('[bridge] 没能在 preload.js / bridge.js 里定位到 window.pomodoro 对象');
+if (!bridgeKeys) {
+  console.error('[bridge] 没能在 bridge.js 里定位到 window.pomodoro 对象');
   process.exit(1);
 }
 
@@ -85,26 +94,26 @@ for (const rel of RENDERER_FILES) {
   for (const m of read(rel).matchAll(/pomodoro\.([A-Za-z_$][\w$]*)/g)) used.add(m[1]);
 }
 
-const missingInBridge = [...new Set([...preloadKeys, ...used])].filter(
+const missingInBridge = [...new Set([...contractKeys, ...used])].filter(
   (k) => !bridgeKeys.includes(k),
 );
 const calledButUndefined = [...called].filter((c) => !defined.has(c));
 const definedButNeverCalled = [...defined].filter((d) => !called.has(d));
-const extraInBridge = bridgeKeys.filter((k) => !preloadKeys.includes(k));
+const extraInBridge = bridgeKeys.filter((k) => !contractKeys.includes(k));
 
 let failed = false;
 const head = (t) => console.log(`\n${t}`);
 const ok = (t) => console.log(`  ✓ ${t}`);
 
-head(`preload.js 暴露 ${preloadKeys.length} 个方法 / bridge.js 实现 ${bridgeKeys.length} 个`);
+head(`契约 ${contractKeys.length} 个方法 / bridge.js 实现 ${bridgeKeys.length} 个`);
 
 if (missingInBridge.length) {
   failed = true;
-  head('✗ preload.js（或渲染层）要的、bridge.js 没补的方法：');
+  head('✗ 契约（或渲染层）要的、bridge.js 没补的方法：');
   for (const k of missingInBridge) console.log(`    ${k}`);
   console.log('  → 渲染层调用时会 TypeError。补进 bridge.js 的 window.pomodoro。');
 } else {
-  ok('preload.js 暴露的方法 bridge.js 全都补上了');
+  ok('契约里的方法 bridge.js 全都补上了');
 }
 
 if (calledButUndefined.length) {
@@ -117,8 +126,8 @@ if (calledButUndefined.length) {
 }
 
 if (extraInBridge.length) {
-  // 不算失败：bridge 故意多给几个 M2 占位方法，方便渲染层提前调用
-  head('提示：bridge.js 有、preload.js 没有的键（M2 占位属正常）：');
+  // 不算失败：bridge 可能故意多给几个占位方法，方便渲染层提前调用
+  head('提示：bridge.js 有、契约里没有的键（占位属正常）：');
   console.log(`    ${extraInBridge.join(', ')}`);
 }
 

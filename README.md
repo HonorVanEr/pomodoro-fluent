@@ -1,10 +1,12 @@
 # 🍅 番茄钟 · Pomodoro Fluent
 
-一个符合 **Windows 11 Fluent Design** 设计规范的番茄钟桌面应用，基于 Electron 构建。
+一个符合 **Windows 11 Fluent Design** 设计规范的番茄钟桌面应用，基于 **Rust / Tauri** 构建（安装包 ~1.3 MB，运行时不依赖 Node）。
 
 ![番茄钟](docs/screenshot.png)
 
-![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-blue) ![Electron](https://img.shields.io/badge/Electron-44-47848F)
+![License](https://img.shields.io/badge/license-MIT-green) ![Platform](https://img.shields.io/badge/platform-Windows%2010%20%2F%2011-blue) ![Tauri](https://img.shields.io/badge/Tauri-2-24C8DB) ![Rust](https://img.shields.io/badge/Rust-2021-000000)
+
+> 早期的 **Electron 实现**已冻结在 [`electron-archive`](https://github.com/HonorVanEr/pomodoro-fluent/tree/electron-archive) 分支 —— 那个分支不再维护、不再发版，只在需要考古旧版行为时查阅。
 
 ## ✨ 功能特性
 
@@ -21,24 +23,24 @@
 ## 🚀 快速开始
 
 ### 环境要求
-- Node.js 18+（含 npm）
+
+**使用安装包的用户**：Windows 10/11 + WebView2 运行时（Win11 自带；Win10 一般也已预装），无其它依赖。
+
+**从源码运行 / 打包**：
+
+- Rust stable（含 `cargo`）＋ [`cargo-tauri`](https://v2.tauri.app/start/prerequisites/)
+- Node.js 18+（**只给 `scripts/` 下的打包与冒烟脚本用，不参与应用运行时**）
 - Windows 10/11
 
 ### 安装与运行
 
 ```bash
-# 1. 安装 Electron
-npm install
+# 1. 构建 hook CLI（sidecar —— GUI 运行时会从自己所在目录读它）
+cargo build --release -p pomodoro-hook
 
-# 2. 启动应用
-npm start
+# 2. 启动应用（开发模式）
+cargo tauri dev
 ```
-
-> 💡 若 Electron 二进制下载缓慢，可配置镜像：
-> ```bash
-> set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
-> npm install
-> ```
 
 ## 🎯 使用说明
 
@@ -59,22 +61,26 @@ npm start
 | **R 键** | 快速重置（含轮次） |
 | **双击托盘图标** | 显示主窗口（迷你/贴边态会先展开完整窗口） |
 | **单击托盘图标** | 有「暂时收起」的确认时＝把它重新弹出来（没有待处理时单击不做任何事） |
-| 设置抽屉 → **复制配置 / 复制安装命令** | 按所选 agent 生成对应的 hook 配置片段 / 一键安装命令（含本机 hook 脚本路径）；也可直接点 **一键安装** 由应用代写 |
+| 设置抽屉 → **复制配置 / 复制安装命令** | 按所选 agent 生成对应的 hook 配置片段 / 一键安装命令（含本机 hook 路径）；也可直接点 **一键安装** 由应用代写 |
 
 ### 托盘菜单
+
 右键托盘图标可：待处理的确认（收起过确认时才会出现）/ 显示主窗口 / 开始-暂停 / 重置 / 跳到下一阶段（立即开始计时）/ 退出。
 
 ### 关于与更新
-设置抽屉底部是 **关于**：显示当前版本号、平台与许可证（两个版本一致，不展示运行环境细节）。
+
+设置抽屉底部是 **关于**：显示当前版本号、平台与许可证（不展示运行环境细节）。
 
 点这里的 **检查更新** 才会向 GitHub 发一次请求查最新版本 —— 这是应用**唯一**的联网动作。
 平时计时、托盘悬浮、Agent 网关一律不联网；发现新版本只是给个「前往下载」按钮，跳到 release 页由你自己下载安装包，应用不在后台偷偷下载或替换任何东西。
 
 ### 后台运行
+
 应用关闭窗口后不会退出，而是隐藏在系统托盘（任务栏右侧的 🍅 图标），计时继续，到点照常弹窗提醒。**退出请在托盘右键菜单选择「退出」。**
 
 ### 界面卡死怎么取证
-Rust 版内置一个**主线程停滞看门狗**（默认开）：每 500ms 向主线程要一次回执，超过 3 秒拿不到就判定主
+
+应用内置一个**主线程停滞看门狗**（默认开）：每 500ms 向主线程要一次回执，超过 3 秒拿不到就判定主
 线程卡住，把**当时正在执行的那个原生调用**记到 `%APPDATA%\pomodoro-fluent\watchdog.log`（一行一条，
 时间戳是 Unix 毫秒 + 停滞时长 + 调用名）。
 
@@ -112,20 +118,15 @@ Rust 版内置一个**主线程停滞看门狗**（默认开）：每 500ms 向�
 
 **一键接入（推荐）**：应用保持运行 → 设置抽屉选好 agent → 点 **一键安装**，配置直接写好（原文件自动备份），面板上会告诉你写了哪些文件、有哪些注意事项；**装失败也不用慌**，面板会给出一模一样的命令行让你复制到终端执行。
 
-也可以走命令行（「复制安装命令」按钮复制的是这条；应用会**按当前版本**自动生成正确写法）：
+也可以走命令行（「复制安装命令」按钮复制的是这条）：
 
 ```bash
-# Rust / Tauri 版（原生 CLI，无需 node）
 "%APPDATA%\番茄钟\hook\pomodoro-hook.exe" install --agent all
-
-# Electron 版（Node 脚本，需要本机有 node）
-node "%APPDATA%\番茄钟\hook\pomodoro-hook.js" install --agent all
 # 宿主可选 zcode / claude / vscode / trae / cursor / opencode / codex / qwen
 ```
 
-> **两份安装包、两套 hook CLI**：Rust 版释放 `pomodoro-hook.exe`（1 MB 级安装包，不依赖 node），
-> Electron 版释放 `pomodoro-hook.js`。两版身份与数据目录相同（**不要并排装**），hook 也只该让一个
-> 版本管。命令写法与手动配置片段的差异见 [Agent 集成指南](docs/agent-hooks.md)。
+> hook CLI 是**原生可执行文件**（`cargo build --release -p pomodoro-hook` 产出，随安装包释放到
+> 用户目录），运行时不依赖 Node —— 本机没装 Node 也能正常弹窗。
 
 也可以手动粘贴配置片段：Claude Code 在 `~/.claude/settings.json` 的 `hooks` 下；ZCode 在 `~/.zcode/cli/config.json` 的 `hooks.events` 下（需 `"enabled": true`）；**VS Code Copilot** 在 `~/.copilot/hooks/*.json` 或 `.github/hooks/*.json`（格式与 Claude Code 相同，但只有 8 个事件、无 `PermissionRequest`，提问挂 `PreToolUse`；VS Code **会忽略 matcher**，非提问工具的调用在 CLI 里静默上报）；**Trae** 在 `%userprofile%/.trae-cn/hooks.json`（Claude Code 那种嵌套格式，6 个事件、有 `Notification` 但无 `PermissionRequest`，提问同样挂 `PreToolUse`；Trae 的 `matcher` 是真生效的，用它收窄到 `AskUserQuestion`）；**Cursor** 在 `~/.cursor/hooks.json`（camelCase 事件，`beforeShellExecution` / `beforeMCPExecution` / `preToolUse` 三条仍做审批）；**Qwen Code** 在 `~/.qwen/settings.json`（与 Claude Code 同形，提问 + `PermissionRequest` 都有）；OpenCode 走插件；**Codex** 在 `~/.codex/hooks.json`（12 个事件，审批走它自己的 `PermissionRequest` —— 该事件**只在 Codex 本来就要问用户时触发**）。
 
@@ -149,50 +150,38 @@ OpenCode 插件接入、远程允许/拒绝、HTTP API 全量说明见 **[Agent 
 
 ## 🛠️ 技术实现
 
-- **主进程**（`main.js`）：窗口管理、系统托盘、通知弹窗、单实例锁
-- **Agent 网关**（Electron 版 `gateway.js` / Rust 版 `src-tauri/src/gateway.rs`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；ask / permission / notification 三类交互经长轮询回传决策；hook CLI（Electron 版 `bin/pomodoro-hook.js` / Rust 版 `crates/hook`）零依赖，应用未运行时静默退出，绝不阻断 agent
-- **一键安装**（`main.js`）：主进程用 Electron 自带的 Node（`ELECTRON_RUN_AS_NODE=1`）跑 hook CLI 写配置，所以本机没装 node 也能装；成败按 CLI 退出码判断（未知宿主 / 写盘失败都非零退出），失败时把等价命令行交还给界面供复制
+- **GUI 进程**（`src-tauri/`）：窗口管理、系统托盘、通知弹窗、单实例锁；界面由 WebView2 直接加载 `renderer/`
+- **Agent 网关**（`src-tauri/src/gateway.rs`）：仅绑定 `127.0.0.1` 回环 + 每次启动随机 token + Host 头校验（防 DNS rebinding）；ask / permission / notification 三类交互经长轮询回传决策
+- **hook CLI**（`crates/hook`）：零依赖原生 exe，应用未运行时静默退出，绝不阻断 agent
+- **一键安装**（`src-tauri/src/commands.rs`）：直接调 `pomodoro-hook.exe install` 写配置，成败按 CLI 退出码判断（未知宿主 / 写盘失败都非零退出），失败时把等价命令行交还给界面供复制；进程调用这类**无界等待一律走阻塞线程池**，不占 GUI 主线程
 - **迷你悬浮 & 贴边隐藏**：手动光标跟随拖拽（原生 drag 区会吞掉 `:hover`）；贴边收起时窗口带透明留白绕开 Windows 约 32×39 的最小窗口限制，仅靠屏幕边缘的 6px 绘制进度条，透明区域完全穿透（可见性与点击均不受影响）
-- **阶段结束提醒**：弹窗页按 payload 的 `timeoutMs` 决定停留时长（纯通知默认 5s，阶段结束 20s），鼠标悬停暂停倒计时与进度条；弹窗按钮动作回到主进程后转成渲染层命令（`start-next` → 直接开跑下一阶段），网关侧仍是长轮询等决策、与定时器提醒互不干扰
-- **渲染进程**（`renderer/`）：Win11 风格 UI + 番茄钟逻辑
-- **安全桥接**（`preload.js`）：contextBridge 隔离
+- **阶段结束提醒**：弹窗页按 payload 的 `timeoutMs` 决定停留时长（纯通知默认 5s，阶段结束 20s），鼠标悬停暂停倒计时与进度条；弹窗按钮动作回到应用后转成渲染层命令（`start-next` → 直接开跑下一阶段），网关侧仍是长轮询等决策、与定时器提醒互不干扰
+- **渲染层**（`renderer/`）：Win11 风格 UI + 番茄钟逻辑（纯 HTML/CSS/JS，无构建步骤）
+- **桥接**（`src-tauri/src/bridge.js`）：把 Tauri 的 IPC 补成 `window.pomodoro`（方法名与参数形状与旧 preload 逐项对齐），渲染层不必为 WebView2 改写
+- **主线程看门狗**（`src-tauri/src/watchdog.rs`）：见上文「界面卡死怎么取证」
 
 ### 视觉设计
-- **毛玻璃效果**：`backdrop-filter: blur` + 半透明背景（CSS 兜底）
-- **系统级 Acrylic 模糊**：通过 Win32 `SetWindowCompositionAttribute`（ACCENT_ENABLE_ACRYLICBLURBEHIND）实现真正的背景模糊（`main.js` 中 `ENABLE_ACRYLIC` 开关，部分 Win10 版本上开启会有卡顿/发白问题，默认关闭，由近实心玻璃卡片兜底）；打包后脚本自动从 asar 解包到用户数据目录执行
+- **毛玻璃效果**：`backdrop-filter: blur` + 半透明背景
 - **Fluent 圆角**：主窗口 12px、按钮 7-9px、弹窗 14px；透明窗口只画内容圆角、不画外溢阴影，四角干净
 - **自适应配色**：CSS 变量随阶段切换
 - **平滑动画**：环形进度、弹性按钮、弹窗入场
 
+> 系统级 Acrylic（Win32 `SetWindowCompositionAttribute`）在 Rust 版**没有实现** —— 它只在部分 Win10
+> 版本上生效、且会带来卡顿/发白问题。现在的方案是 `backdrop-filter` + 近实心玻璃卡片兜底。
+
 ## 📦 打包为独立应用
 
 ```bash
-# 安装打包工具（需要网络，国内可用 npmmirror 加速）
-npm i -D electron-builder --registry=https://registry.npmmirror.com
-
-# 打包为便携目录（快速验证，输出 dist/win-unpacked）
-npm run pack:dir
-
-# 打包 Windows 安装包（NSIS，输出 dist/Pomodoro-Fluent-Setup-<版本>.exe）
-npm run pack
+npm run pack     # 输出 release/Pomodoro-Fluent-Rust-Setup-<版本>.exe
 ```
 
-打包产物位于 `dist/` 目录：
-- `Pomodoro-Fluent-Setup-<版本>.exe` —— 安装程序（含桌面/开始菜单快捷方式，可选安装目录；纯英文产物名，GitHub Release 附件名不支持中文）。版本号取自 `package.json`；已发布版本见 [Releases](https://github.com/HonorVanEr/pomodoro-fluent/releases)
-- `win-unpacked/番茄钟.exe` —— 免安装便携版（直接运行）
-
-> 打包需要联网下载 NSIS 等工具，若速度慢可设置镜像：
-> ```bash
-> set ELECTRON_MIRROR=https://npmmirror.com/mirrors/electron/
-> set ELECTRON_BUILDER_BINARIES_MIRROR=https://npmmirror.com/mirrors/electron-builder-binaries/
-> npm run pack
-> ```
+版本号同步、GitHub 镜像、sidecar 资源闸门等细节见 **[发布流程](docs/release.md)**。
 
 ## 📁 项目结构
 
 ```
-pomodoro-fluent/                 # 一个仓库、两套实现（同号发布，见 docs/dual-release.md）
-├── renderer/            # 界面（两版共用，逐字节一致）
+pomodoro-fluent/
+├── renderer/            # 界面（WebView2 直接加载，无构建步骤）
 │   ├── index.html       # 主窗口
 │   ├── styles.css       # 主界面样式（Win11 Fluent）
 │   ├── app.js           # 番茄钟逻辑
@@ -200,23 +189,19 @@ pomodoro-fluent/                 # 一个仓库、两套实现（同号发布，
 │   ├── notify.css       # 弹窗样式
 │   └── notify.js        # 弹窗逻辑
 │
-├── ── Electron 版 ──
-├── main.js              # 主进程
-├── preload.js           # 安全桥接层
-├── gateway.js           # Agent 网关（本地 HTTP，hooks 对接）
-├── bin/pomodoro-hook.js # Agent hook CLI（Node 脚本，供 8 家宿主 hook + curl 调用）
-├── apply-acrylic.ps1    # Acrylic 毛玻璃（DWM API，PowerShell）
-│
-├── ── Rust / Tauri 版 ──
-├── src-tauri/           # GUI（番茄钟.exe）+ Tauri 配置 + Rust 网关
+├── src-tauri/           # GUI（番茄钟.exe）+ Tauri 配置 + Rust 网关/托盘/窗口
+│   ├── src/bridge.js    # 把 Tauri IPC 补成 window.pomodoro（渲染层契约）
+│   └── tauri.conf.json  # 窗口 / bundle.resources（sidecar 进包的唯一途径）
 ├── crates/
 │   ├── core/            # 两个 exe 共用（路径 / 协议助手）
 │   └── hook/            # Agent hook CLI（pomodoro-hook.exe）
 │
-├── package.json         # 版本号唯一事实源（两版共用，打包时同步进 tauri.conf.json）
-├── assets/              # 图标资源（自动生成）
-├── scripts/             # 打包 / 冒烟脚本
-└── docs/                # 文档（agent-hooks / dual-release / rust-migration-plan …）
+├── bin/opencode/        # OpenCode 插件（hook CLI 会把它拷进宿主目录）
+├── assets/              # 图标资源
+├── build/icon.ico       # 应用图标（tauri bundle 用）
+├── package.json         # 版本号唯一事实源（打包时同步进 tauri.conf.json + Cargo.toml）
+├── scripts/             # 打包 / 冒烟 / 自检脚本
+└── docs/                # 文档（agent-hooks / release / openviking-memory-prompt …）
 ```
 
 ## 📄 许可证

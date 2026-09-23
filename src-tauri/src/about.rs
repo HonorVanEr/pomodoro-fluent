@@ -14,7 +14,7 @@ use tauri::AppHandle;
 const REPO_OWNER: &str = "HonorVanEr";
 const REPO_NAME: &str = "pomodoro-fluent";
 
-/// GitHub release 接口（与 Electron 版同一个端点，tag 无前缀，见 docs/dual-release.md）
+/// GitHub release 接口（tag 无前缀，见 docs/release.md）
 const UPDATE_API: &str = "https://api.github.com/repos/HonorVanEr/pomodoro-fluent/releases/latest";
 
 const REQUEST_TIMEOUT_S: u64 = 10;

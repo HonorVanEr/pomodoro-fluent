@@ -8,7 +8,7 @@ members = ["src-tauri", "crates/core", "crates/hook"]
 # ⚠ 别在成员 crate 里写死 version：会盖掉这里，且打包脚本管不到（曾踩过，
 # hook exe 的版本资源一直停在 2.0.0）。
 [workspace.package]
-version = "1.2.0"
+version = "1.3.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/HonorVanEr/pomodoro-fluent"

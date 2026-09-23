@@ -1,24 +1,15 @@
-# 依赖
+# 依赖（仓库里没有 npm 运行时依赖，这一行只为临时装包留位）
 node_modules/
-
-# 构建产物
-dist/
-out/
 
 # Rust / Tauri 构建产物
 target/
 src-tauri/gen/
 
-# 双版本发布收集目录
+# 安装包收集目录
 release/
 
-# 缓存与测试临时文件
-.electron-cache/
+# 测试临时文件
 .env-test/
-smoke-test.js
-func-test.js
-icon-test.js
-material-test.js
 
 # 系统文件
 Thumbs.db

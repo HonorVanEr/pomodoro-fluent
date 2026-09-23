@@ -2,20 +2,20 @@
 'use strict';
 
 // ---------------------------------------------------------------------------
-// 一次打出两份安装包：Electron 版 + Rust/Tauri 版
+// 打 Windows 安装包（Rust / Tauri 版）
 //
 // 用法：
-//   node scripts/pack-release.mjs                 # 两份都打（默认）
-//   node scripts/pack-release.mjs --only electron
-//   node scripts/pack-release.mjs --only rust
-//   node scripts/pack-release.mjs --out <目录>
+//   node scripts/pack-release.mjs                  # 等价 npm run pack
+//   node scripts/pack-release.mjs --out <目录>     # 换收集目录（默认 release/）
+//
+// > 旧 Electron 实现已冻结在 `electron-archive` 分支，本脚本不再出 Electron 包。
 //
 // ## 版本号：只有一个事实源
 //
-// **`package.json` 的 `version` 是唯一事实源**，两份安装包共用一个版本号。
-// 打 Rust 包前脚本会把它同步写进这两个文件（都只替换版本号那一行，不动其它格式）：
+// **`package.json` 的 `version` 是唯一事实源**。打包装前脚本会把它同步写进这两个文件
+// （都只替换版本号那一行，不动其它格式）：
 //   - `src-tauri/tauri.conf.json` → 决定安装包文件名与应用版本号
-//   - `src-tauri/Cargo.toml`     → 决定 `Compiling <crate> vX.Y.Z` 与 **GUI exe 的版本资源**
+//   - `Cargo.toml`（`[workspace.package]`）→ 决定 `Compiling <crate> vX.Y.Z` 与 **GUI exe 的版本资源**
 // 少同步一个就会出现「安装包是 1.1.6、构建日志写 2.0.0」这种对不上的情况。
 //
 // ⚠ 已知无害缺口：**hook exe 的 PE 版本资源是空的**。GUI 的版本资源由 tauri-build 嵌入，
@@ -24,20 +24,14 @@
 //   要补得引入 winresource / embed-resource 之类的 build 依赖；纯元数据，未做。
 //
 // 升版本 = 只改 `package.json`（沿用既有的 `chore: bump version to X.Y.Z` 流程），
-// 然后跑一次本脚本把版本号带到 `tauri.conf.json`。别手工去改 tauri.conf.json。
+// 然后跑一次本脚本把版本号带到 `tauri.conf.json` + `Cargo.toml`。别手工去改它们。
 //
-// ## 发布形态：一个 tag，一个 release，两份安装包
+// ## 产物
 //
-// 产物统一落到 `release/`（不分子目录），一个 release 挂两份：
-//   Pomodoro-Fluent-Setup-X.Y.Z.exe        ← Electron 版
-//   Pomodoro-Fluent-Setup-X.Y.Z.exe.blockmap
-//   latest.yml
-//   Pomodoro-Fluent-Rust-Setup-X.Y.Z.exe   ← Rust / Tauri 版
+// 统一落到 `release/`（不分子目录）：
+//   Pomodoro-Fluent-Rust-Setup-X.Y.Z.exe
 //
-// 两个文件名必须能一眼分辨 —— 它们挂在同一个 release 页面里，用户是照着
-// 文件名点下载的。别把它们改成容易混淆的名字。
-//
-// 发布约定见 docs/dual-release.md。
+// 发布约定见 docs/release.md。
 // ---------------------------------------------------------------------------
 
 import { execFileSync } from 'node:child_process';
@@ -60,17 +54,19 @@ const argOf = (name, fallback = '') => {
   return i >= 0 ? (argv[i + 1] ?? fallback) : fallback;
 };
 
-const ONLY = argOf('--only', 'all');
-if (!['all', 'electron', 'rust'].includes(ONLY)) {
-  console.error(`[pack] --only 只能是 all | electron | rust，收到: ${ONLY}`);
-  process.exit(1);
-}
-
 const log = (msg) => console.log(`[pack] ${msg}`);
 const fail = (msg) => {
   console.error(`[pack] 失败: ${msg}`);
   process.exit(1);
 };
+
+// 旧用法直接报错退出，别静默忽略 —— 以为出了 Electron 包却没出，比直接失败更难查
+if (argv.includes('--only')) {
+  fail(
+    '--only 已取消：Electron 实现冻结在 electron-archive 分支，本仓库只出 Rust 安装包。\n' +
+      '       直接 `node scripts/pack-release.mjs` 即可。',
+  );
+}
 
 const run = (bin, args, extraEnv = {}) => {
   log(`$ ${bin} ${args.join(' ')}`);
@@ -150,55 +146,10 @@ function syncVersions() {
   syncVersionIn(CARGO_TOML, CARGO_VERSION_RE, '[workspace.package] 段的 version');
 }
 
-const outDir = resolve(argOf('--out', join(ROOT, 'release')));
-mkdirSync(outDir, { recursive: true });
-
-const collected = [];
-
 // ---------------------------------------------------------------------------
-// Electron 线
+// 打包
 // ---------------------------------------------------------------------------
-function packElectron() {
-  log(`—— Electron 版 v${version} ——`);
-
-  run('npm', ['run', 'pack'], {
-    // electron-builder 会清理 dist/win-unpacked（几十个文件），会被批量删除保护拦下
-    CODEBUDDY_SAFE_DELETE_ENABLED: '0',
-  });
-
-  const wanted = [
-    `Pomodoro-Fluent-Setup-${version}.exe`,
-    `Pomodoro-Fluent-Setup-${version}.exe.blockmap`,
-    'latest.yml',
-  ];
-  let hit = 0;
-  for (const name of wanted) {
-    const src = join(ROOT, 'dist', name);
-    if (!existsSync(src)) {
-      log(`  跳过（产物不存在）: dist/${name}`);
-      continue;
-    }
-    copyFileSync(src, join(outDir, name));
-    collected.push(name);
-    hit += 1;
-    log(`  ✓ ${name}`);
-  }
-  if (hit === 0) {
-    const distList = existsSync(join(ROOT, 'dist'))
-      ? readdirSync(join(ROOT, 'dist')).filter((f) => /setup|\.yml$|blockmap/i.test(f))
-      : [];
-    fail(
-      `dist/ 里没找到 v${version} 的安装包。dist/ 里现有：` +
-        (distList.length ? distList.join(', ') : '(空)') +
-        `\n       多半是版本号对不上（electron-builder 是按 package.json 的 version 命名的）。`,
-    );
-  }
-}
-
-// ---------------------------------------------------------------------------
-// Rust 线
-// ---------------------------------------------------------------------------
-function packRust() {
+function packRust(outDir) {
   log(`—— Rust / Tauri 版 v${version} ——`);
 
   const env = {};
@@ -245,37 +196,33 @@ function packRust() {
     fail(`v${version} 匹配到多个安装包，无法确定发哪个: ${setups.join(', ')}`);
   }
 
+  const collected = [];
   for (const file of setups) {
-    // 统一改名：和 Electron 版挂在同一个 release 页面里，看不出谁是谁就糟了
     const target = `Pomodoro-Fluent-Rust-Setup-${version}.exe`;
     copyFileSync(join(nsisDir, file), join(outDir, target));
     collected.push(target);
     const mb = (statSync(join(outDir, target)).size / 1048576).toFixed(2);
     log(`  ✓ ${target}  ${mb} MB  (← ${file})`);
   }
+  return collected;
 }
 
 // ---------------------------------------------------------------------------
-// 先同步版本号，再分别打包
+// 先同步版本号，再打包
 // ---------------------------------------------------------------------------
-syncVersions();
+const outDir = resolve(argOf('--out', join(ROOT, 'release')));
+mkdirSync(outDir, { recursive: true });
 
-if (ONLY === 'all' || ONLY === 'electron') packElectron();
-if (ONLY === 'all' || ONLY === 'rust') packRust();
+syncVersions();
+const collected = packRust(outDir);
 
 log('');
 log(`完成，共 ${collected.length} 个产物落 ${outDir}`);
 for (const name of collected) log(`  ${name}`);
 
-if (ONLY === 'all' && collected.some((n) => n.includes('-Rust-Setup-'))) {
-  log('');
-  log('提示：Rust 版功能已对齐（M5），两份安装包可以一起挂到同一条 release；');
-  log(`      若要本次只发 Electron 版，删掉 Pomodoro-Fluent-Rust-Setup-${version}.exe 即可。`);
-}
-
 log('');
-log('下一步：一个 tag 一个 release，两份安装包挂在一起');
+log('下一步：一个 tag 一个 release');
 log(`  gh release create v${version} --target <mergeCommit> --title v${version} ${toPosix(outDir)}/*`);
 log('');
-log(`（tag 是 v${version}，不带任何前缀 —— 两版版本号统一，别加 rust- 之类的前缀，`);
+log(`（tag 是 v${version}，不带任何前缀 —— 别加 rust- 之类的前缀，`);
 log('  否则 app:check-update 的 /releases/latest 会挑不到它。）');

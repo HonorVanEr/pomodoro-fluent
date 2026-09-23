@@ -369,14 +369,11 @@ fn extract_notes(out: &str) -> String {
 
 /// 一键安装 hook：调原生 CLI `pomodoro-hook.exe install --agent <x> [--clean]` 写配置。
 ///
-/// 返回字段与 Electron 版 `hook:install` **同一形状**（渲染层 `renderInstallResult` 读
-/// `ok` / `agent` / `message` / `notes` / `command` / `log` / `nodeMissing`）：
+/// 返回字段（渲染层 `renderInstallResult` 读 `ok` / `agent` / `message` / `notes` /
+/// `command` / `log`）：
 ///   - `command` — 手动等价命令（失败时给用户复制的退路，也是「复制安装命令」的来源）
 ///   - `files`   — 从 stdout 解析出的写入路径（渲染层目前不读，但别让形状漂移）
 ///   - `ok`      — 以 **CLI 退出码**为准（未知宿主 / 写盘失败都非零退出）
-///
-/// 与 Electron 版唯一的差别：Rust 版 CLI 是原生 exe，**运行时不依赖 node**，
-/// 所以不再探 node —— `nodeVersion` 恒为空、`nodeMissing` 恒为 `false`。
 ///
 /// # 为什么必须 `async`
 ///
@@ -427,8 +424,8 @@ fn run_hook_install(agent: &str, clean: bool, command: &str) -> Value {
         args.push("--clean".into());
     }
 
-    // 这段跑在 `spawn_blocking` 的阻塞线程上，**不占主线程** —— 所以不需要 Electron
-    // 版那个 20s 兜底超时：真卡住也只是这一次安装失败，界面照常能用。
+    // 这段跑在 `spawn_blocking` 的阻塞线程上，**不占主线程** —— 真卡住也只是这一次
+    // 安装失败，界面照常能用（不会像同步命令那样把关闭 / 最小化 / 托盘菜单一起冻住）。
     // hook CLI 的 install 是纯本地写盘、不碰网关，实测 30ms 级返回。
     // `output()` 会把子进程的 stdin 接到空句柄（不继承我们的），所以 CLI 里读 stdin
     // 也不会挂住。
@@ -481,8 +478,6 @@ fn run_hook_install(agent: &str, clean: bool, command: &str) -> Value {
         "ok": true, "agent": agent, "command": command,
         "files": files, "log": log,
         "notes": extract_notes(&stdout),
-        "nodeVersion": "",
-        "nodeMissing": false,
         "message": message,
     })
 }
