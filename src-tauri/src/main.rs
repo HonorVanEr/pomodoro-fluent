@@ -1,9 +1,13 @@
 // GUI subsystem：不要黑框。hook 侧是另一个 crate，那边不加这行。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-//! 番茄钟（Rust / Tauri 版）。
+//! 番茄钟（Rust / Tauri 版）。本仓库**只维护这一套实现**。
 //!
-//! 目标：与 Electron 版**行为等价**，但底层换成 Rust + 系统 WebView2。
+//! 下文多处会提到「对应 Electron 版 `main.js` / `gateway.js` / `preload.js` 的某某函数」——
+//! 那是**溯源说明**（讲清这段逻辑的来历与预期行为），不是「去那边改」。
+//! 那些文件已不在本分支，在冻结的 **`electron-archive`** 分支里：
+//! `git show electron-archive:main.js`。
+//!
 //! 分工：
 //! - [`geometry`] —— 纯几何（迷你、贴边、拖拽限位），带单元测试
 //! - [`window`]   —— 窗口读写与行为

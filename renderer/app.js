@@ -1,7 +1,7 @@
 'use strict';
 
-// 屏蔽右键菜单：Electron 默认本来就不弹，WebView2（Rust 版）会弹系统默认菜单，
-// 两版统一在渲染层拦掉。输入框内保留默认菜单（方便粘贴）。
+// 屏蔽右键菜单：WebView2 默认会弹系统菜单，在渲染层拦掉。
+// 输入框内保留默认菜单（方便粘贴）。
 document.addEventListener('contextmenu', (e) => {
   const t = e.target;
   if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
@@ -445,12 +445,10 @@ const PomodoroApp = (() => {
     return ` · ${parts.join(' ')}`;
   }
 
-  // hook CLI 的调用前缀：Electron 版是 node 脚本（pomodoro-hook.js），Tauri 版是原生
-  // 可执行文件（pomodoro-hook.exe）。后缀是 .exe 就直接执行，否则交给 node —— 同一份
-  // 代码两个版本都能用（Electron 传 .js 时输出与旧版逐字节一致）。
+  // hook CLI 的调用前缀：原生可执行文件（pomodoro-hook.exe），路径带引号直接执行
+  // —— 用户目录名可能含空格（`%APPDATA%\番茄钟\`），不加引号会被 shell 拆成两段。
   function hookInvocation(hookPath) {
-    const p = hookPath || '';
-    return /\.exe$/i.test(p) ? `"${p}"` : `node "${p}"`;
+    return `"${hookPath || ''}"`;
   }
 
   // 各家 agent 的 hook 配置片段（复制给用户粘贴/手动编辑）
@@ -629,11 +627,6 @@ const PomodoroApp = (() => {
     box.appendChild(el('div', 'install-msg', res.message || ''));
 
     if (res.ok) {
-      if (res.nodeMissing) {
-        box.appendChild(el('div', 'install-warn',
-          '⚠ 没检测到 node 命令：配置已经写好了，但 hook 运行时要靠 node 拉起脚本，' +
-          '请先装 Node.js（或把它加进 PATH），否则 agent 那边不会弹窗。'));
-      }
       // CLI 打印的注意事项（沙箱运行、与 Claude Code 双跑之类）提到面板上，别埋进日志
       if (res.notes) box.appendChild(el('div', 'install-warn', res.notes));
       box.appendChild(el('div', 'install-hint',
@@ -651,7 +644,7 @@ const PomodoroApp = (() => {
       box.appendChild(copy);
       if (res.command) {
         box.appendChild(el('div', 'install-hint',
-          '提示：命令里的 hook 脚本路径若不存在，说明应用没能把脚本释放到用户目录，' +
+          '提示：命令里的 hook 可执行文件路径若不存在，说明应用没能把它释放到用户目录，' +
           '可先用管理员权限或换一台磁盘可写的机器重试。'));
       }
     }

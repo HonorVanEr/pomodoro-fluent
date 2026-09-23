@@ -3,7 +3,7 @@
 番茄钟运行时会在本地启动一个 **Agent 网关**（默认 `http://127.0.0.1:5277`，仅绑定本机回环地址）。
 agent 要提问、要权限、或只是通知你一声时，番茄钟弹出 Fluent 风格桌面弹窗——**提问和权限可以直接在弹窗里作答**，不用来回切终端。
 
-> 本文对应当前版本 **v1.1.6**。核心行为：**提问与权限都在弹窗里处理，`PreToolUse` 一概不做工具审批**
+> 本文对应当前版本 **v1.2.0**。核心行为：**提问与权限都在弹窗里处理，`PreToolUse` 一概不做工具审批**
 > （审批只走 `PermissionRequest`；没有该事件的宿主交给宿主自己）——详见下面的宿主支持表。
 
 ```
@@ -38,20 +38,16 @@ Codex hooks ───────────┘
 
 > 任何「Claude Code 兼容格式」的宿主（iFlow、Trae、CodeBuddy、Copilot CLI 等）都能直接用，把 hook CLI 当成 hook command 填进去即可。
 
-### hook CLI 有两种形态（本文命令写法以此为准）
+### hook CLI
 
-同一份文档覆盖两个版本，**命令前缀不同**：
+hook CLI 是**原生可执行文件** `pomodoro-hook.exe`（由 `cargo build --release -p pomodoro-hook`
+构建，随安装包释放到用户目录），**运行时不依赖 Node** —— 本机没装 Node 也能正常弹窗。
 
-| 版本 | 安装包 | hook CLI 命令 |
-|---|---|---|
-| **Tauri 版**（推荐，体积 ~1 MB，无需 node） | `番茄钟_..._x64-setup.exe` | `"%APPDATA%\番茄钟\hook\pomodoro-hook.exe"` |
-| **Electron 版** | `番茄钟 Setup ...exe` | `node "%APPDATA%\番茄钟\hook\pomodoro-hook.js"`（需要本机有 node） |
+下文所有配置片段与命令都按这个前缀书写：
 
-**下文所有配置片段与命令默认按 Tauri 版（`.exe`）书写**。如果你用的是 Electron 版，
-把出现 `"%APPDATA%\番茄钟\hook\pomodoro-hook.exe"` 的地方一律换成
-`node "%APPDATA%\番茄钟\hook\pomodoro-hook.js"` 即可，其余一字不差。
+`"%APPDATA%\番茄钟\hook\pomodoro-hook.exe"`
 
-> 应用里的「复制配置」「复制安装命令」会**自动**按当前版本生成正确写法，不用自己改。
+> 应用里的「复制配置」「复制安装命令」会**自动**填好路径，不用自己拼。
 
 ## 三种弹窗
 
@@ -158,9 +154,8 @@ hook 侧的上报会静默跳过（不会阻断 agent 工作）；想恢复弹�
 番茄钟启动时会自动把 hook CLI 释放到固定路径（与仓库/安装位置解耦）：
 
 ```
-%APPDATA%\番茄钟\hook\pomodoro-hook.exe               # Tauri 版（原生可执行文件，无需 node）
-%APPDATA%\番茄钟\hook\pomodoro-hook.js                # Electron 版（Node 脚本）
-%APPDATA%\番茄钟\hook\opencode\pomodoro-opencode.ts   # OpenCode 插件（两版共用）
+%APPDATA%\番茄钟\hook\pomodoro-hook.exe               # hook CLI（原生可执行文件，无需 node）
+%APPDATA%\番茄钟\hook\opencode\pomodoro-opencode.ts   # OpenCode 插件
 ```
 
 > 路径跟的是应用的 userData（打包版是 `%APPDATA%\番茄钟`）；找不到时会回退读
@@ -178,13 +173,11 @@ hook 侧的上报会静默跳过（不会阻断 agent 工作）；想恢复弹�
 - 安装成功：列出写入的配置文件 + 注意事项（比如 Trae 要选「本地自动运行」）→ 重启对应 agent 生效；
 - 安装失败：面板直接给出**原因**（写盘失败 / 权限 / 路径被占用）和**等价的命令行**，
   点「复制命令」就能自己到终端执行，不用回来找；
-- **Tauri 版**：hook CLI 是原生 exe，不依赖 node，配置装好即可用；
-- **Electron 版**：装完但本机没有 `node` 会明确警告 —— 配置装上了没错，但 hook 是运行时用
-  `node "<脚本>"` 拉起的，缺了它 agent 那边不会弹窗。
+- hook CLI 是原生 exe，不依赖 node，配置装好即可用。
 
-实现上，两版都由主进程直接调用 hook CLI（Tauri 跑 `pomodoro-hook.exe`；Electron 用
-**Electron 自带的 Node**（`ELECTRON_RUN_AS_NODE=1`）跑 `pomodoro-hook.js`），所以本机没装
-node 也能把配置写进去；写进配置的命令与手动安装完全一致（Tauri 写 `.exe`、Electron 写 `node "..."`）。
+实现上，应用直接调用 `pomodoro-hook.exe` 写配置，写进配置的命令与手动安装完全一致。
+（这是**无界等待**——要等子进程退出并收齐输出，所以跑在阻塞线程池上、不占 GUI 主线程；
+同步命令一旦卡住，关闭 / 最小化 / 托盘菜单会一起没反应。见 `commands.rs` 的 `hook_install`。）
 
 **方式二：复制命令自己执行**
 
@@ -593,7 +586,7 @@ OpenCode 走插件。执行 `install --agent opencode` 会：
 | `question.asked` | 调番茄钟弹提问窗 → `POST /question/{id}/reply` 回传 `answers`（string[][]）；取消则 reject |
 | `session.idle` / `session.error` | 上报 `stop` / `notification` |
 
-插件本身不含业务逻辑，全部转发给 hook CLI（两版都优先找 `.exe`，没有再退回 `node "...pomodoro-hook.js"`）：
+插件本身不含业务逻辑，全部转发给 hook CLI（找 `pomodoro-hook.exe`；找不到时回退 `node "...pomodoro-hook.js"`，兼容还没换掉旧 hook 的机器）：
 
 ```
 opencode-permission   # stdin {permission} → stdout {status}
@@ -712,20 +705,17 @@ CLI 直连模式（等价于上面的通用能力）：
 ## 自测
 
 ```bash
-# 两版共用：纯 Node 跑通全链路（弹窗模拟 + ZCode/Claude Code 协议 + OpenCode 子命令）
-node scripts/smoke-interaction.js
+# 单元测试（网关 / 协议 / 几何 / 看门狗 / hook CLI）
+cargo test --workspace
 
-# Tauri 版：真起应用，让 Rust 自己打一遍 HTTP 接口（端点 / 协议 / 超时兜底）
+# 真起应用，让应用自己打一遍 HTTP 接口（端点 / 协议 / 超时兜底 / 弹窗渲染）
 node scripts/smoke-gateway.mjs
 
-# 双版本差分（Git Bash）：同一输入喂给 JS hook 与 Rust hook，stdout 必须一致
-bash scripts/check-hook-parity.sh
+# GUI 启动握手冒烟（起真实 GUI，验 renderer → IPC → Rust 链路）
+node scripts/smoke-tauri.mjs
 
-# Electron 版：应用内自检
-POMODORO_GATEWAY_SMOKE=1 npm start
-
-# 依次弹一遍 ask / permission / notification，并把渲染层实测尺寸打到日志（Electron）
-POMODORO_POPUP_DEMO=1 npm start
+# 渲染层契约静态比对（bridge.js ↔ commands 的命令名与参数）
+node scripts/check-bridge-parity.mjs
 ```
 
 ## Roadmap
