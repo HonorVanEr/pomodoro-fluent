@@ -162,18 +162,11 @@ fn platform_label() -> String {
 
 pub fn app_info(app: &AppHandle) -> Value {
     let pkg = app.package_info();
+    // 渲染层只拼「{platform} · {license}」，不再显示运行环境细节
+    // （旧版「Electron  · Node  · …」那行是 M1 的已知显示瑕疵，已随渲染层一并去掉）。
     json!({
         "name": pkg.name,
         "version": pkg.version.to_string(),
-        // ⚠ 渲染层把这两个字段拼成「Electron {electron} · Node {node} · …」。
-        // Rust 版没有 Electron / Node，只能留空 —— 那一行会显示成
-        // 「Electron  · Node  · win32-x64 · MIT」。**这是 M1 已知的显示瑕疵**：
-        // 渲染层在 M1 要求"一行不改"，修它要改 renderer/app.js 的 loadAbout()
-        // 那一行模板字符串（见 docs/rust-migration-plan.md 的 M1 遗留项）。
-        // 不要为了让面板好看而在这里编造 electron / node 版本号。
-        "electron": "",
-        "node": "",
-        "chrome": "",
         "platform": platform_label(),
         "repoUrl": repo_url(),
         "license": "MIT",

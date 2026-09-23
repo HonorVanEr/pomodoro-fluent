@@ -17,6 +17,14 @@ const params = new URLSearchParams(window.location.search);
 const POPUP_ID = params.get('id') || '';
 const api = window.pomodoro;
 
+// 屏蔽右键菜单（与 app.js 同一段逻辑）：WebView2 会弹系统默认菜单，两版统一拦掉。
+// 提问弹窗的自定义输入框内保留默认菜单（方便粘贴）。
+document.addEventListener('contextmenu', (e) => {
+  const t = e.target;
+  if (t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable)) return;
+  e.preventDefault();
+});
+
 const KIND_LABELS = {
   ask: '提问',
   permission: '权限',

@@ -1167,9 +1167,6 @@ function fetchLatestRelease() {
 ipcMain.handle('app:info', () => ({
   name: app.getName(),
   version: app.getVersion(),
-  electron: process.versions.electron || '',
-  node: process.versions.node || '',
-  chrome: process.versions.chrome || '',
   platform: `${process.platform}-${process.arch}`,
   repoUrl: REPO_URL,
   license: 'MIT',
